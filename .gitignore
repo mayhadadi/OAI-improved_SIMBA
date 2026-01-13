@@ -32,12 +32,6 @@ datasets/
 *.tar
 *.tar.gz
 
-# Experiment results
-experiment_results/
-results/
-logs/
-*.log
-
 # Neural network models
 *.pth
 *.pt
