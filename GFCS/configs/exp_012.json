@@ -1,0 +1,116 @@
+{
+    "experiment_id": "exp_012",
+    "description": "GFCS attack - MobileNetV2 victim on CIFAR-10 (full test set)",
+    "surr_desc": "4 surrogates: ResNet-56, ResNet-44, ResNet-32, VGG-19",
+    "data_desc": "CIFAR-10 test set, 10000 images, seed 42",
+    "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto",
+    "victim": {
+        "model_name": "mobilenet_v2",
+        "num_classes": 10,
+        "normalization": {
+            "mean": [
+                0.4914,
+                0.4822,
+                0.4465
+            ],
+            "std": [
+                0.2470,
+                0.2435,
+                0.2616
+            ]
+        }
+    },
+    "surrogates": [
+        {
+            "model_name": "resnet56",
+            "num_classes": 10,
+            "normalization": {
+                "mean": [
+                    0.4914,
+                    0.4822,
+                    0.4465
+                ],
+                "std": [
+                    0.2470,
+                    0.2435,
+                    0.2616
+                ]
+            }
+        },
+        {
+            "model_name": "resnet44",
+            "num_classes": 10,
+            "normalization": {
+                "mean": [
+                    0.4914,
+                    0.4822,
+                    0.4465
+                ],
+                "std": [
+                    0.2470,
+                    0.2435,
+                    0.2616
+                ]
+            }
+        },
+        {
+            "model_name": "resnet32",
+            "num_classes": 10,
+            "normalization": {
+                "mean": [
+                    0.4914,
+                    0.4822,
+                    0.4465
+                ],
+                "std": [
+                    0.2470,
+                    0.2435,
+                    0.2616
+                ]
+            }
+        },
+        {
+            "model_name": "vgg19",
+            "num_classes": 10,
+            "normalization": {
+                "mean": [
+                    0.4914,
+                    0.4822,
+                    0.4465
+                ],
+                "std": [
+                    0.2470,
+                    0.2435,
+                    0.2616
+                ]
+            }
+        }
+    ],
+    "dataset": {
+        "name": "cifar10",
+        "path": "./data",
+        "num_images": 10000,
+        "seed": 42,
+        "image_size": 32
+    },
+    "attack": {
+        "method": "gfcs",
+        "epsilon": 2.0,
+        "max_queries": 10000,
+        "targeted": false,
+        "norm_bound": {
+            "type": "auto",
+            "value": null
+        },
+        "direction_selection": {
+            "method": "standard",
+            "gradient_normalization": "l2",
+            "ods_sampling": "uniform"
+        }
+    },
+    "output": {
+        "save_adversarial_examples": false,
+        "save_perturbations": false,
+        "save_detailed_logs": true
+    }
+}
