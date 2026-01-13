@@ -1,6 +1,6 @@
 # Kaggle credentials
 kaggle.json
-*.json
+# Note: Config JSON files are allowed, only kaggle.json is blocked
 
 # Python
 __pycache__/

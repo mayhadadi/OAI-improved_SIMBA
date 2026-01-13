@@ -25,6 +25,8 @@ import time
 from datetime import datetime
 
 from gfcs import GFCS
+from cifar10_models import load_cifar10_model
+
 
 
 class NormalizedModel(nn.Module):
@@ -116,8 +118,11 @@ def load_model(model_config: Dict[str, Any], device: str) -> nn.Module:
     
     print(f"Loading {model_name} (num_classes={num_classes})...")
     
-    # Load pretrained model
-    if model_name == 'resnet50':
+    # Load CIFAR-10 pretrained models if num_classes=10
+    if num_classes == 10:
+        model = load_cifar10_model(model_name, device)
+    # Load ImageNet pretrained models
+    elif model_name == 'resnet50':
         model = models.resnet50(pretrained=True)
         if num_classes != 1000:
             model.fc = nn.Linear(model.fc.in_features, num_classes)
