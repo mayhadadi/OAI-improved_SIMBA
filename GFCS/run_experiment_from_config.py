@@ -157,7 +157,7 @@ def load_model(model_config: Dict[str, Any], device: str) -> nn.Module:
     # Wrap with normalization
     mean = model_config['normalization']['mean']
     std = model_config['normalization']['std']
-    model_wrapped = NormalizedModel(model, mean, std)
+    model_wrapped = NormalizedModel(model, mean, std).to(device)
     
     return model_wrapped
 
