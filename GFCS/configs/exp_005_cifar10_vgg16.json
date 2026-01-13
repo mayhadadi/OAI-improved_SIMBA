@@ -1,97 +1,97 @@
 {
   "experiment_id": "exp_005",
-  "description": "GFCS attack - VGG-16 victim on CIFAR-10 (transfer learning test)",
-  "surr_desc": "4 surrogates: VGG-19, ResNet-34, DenseNet-121, MobileNet-v2",
-  "data_desc": "CIFAR-10 test set, 2000 images, seed 42, resized to 224x224",
-  "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto (sqrt(0.001*D)), gradient_normalization=l2, ods_sampling=uniform",
+  "description": "GFCS attack - VGG-19 victim on CIFAR-10",
+  "surr_desc": "4 surrogates: VGG-16, VGG-13, VGG-11, ResNet-56",
+  "data_desc": "CIFAR-10 test set, 2000 images, seed 42",
+  "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto",
   "victim": {
-    "model_name": "vgg16",
-    "num_classes": 1000,
+    "model_name": "vgg19",
+    "num_classes": 10,
     "normalization": {
       "mean": [
-        0.485,
-        0.456,
-        0.406
+        0.4914,
+        0.4822,
+        0.4465
       ],
       "std": [
-        0.229,
-        0.224,
-        0.225
+        0.2470,
+        0.2435,
+        0.2616
       ]
     }
   },
   "surrogates": [
     {
-      "model_name": "vgg19",
-      "num_classes": 1000,
+      "model_name": "vgg16",
+      "num_classes": 10,
       "normalization": {
         "mean": [
-          0.485,
-          0.456,
-          0.406
+          0.4914,
+          0.4822,
+          0.4465
         ],
         "std": [
-          0.229,
-          0.224,
-          0.225
+          0.2470,
+          0.2435,
+          0.2616
         ]
       }
     },
     {
-      "model_name": "resnet34",
-      "num_classes": 1000,
+      "model_name": "vgg13",
+      "num_classes": 10,
       "normalization": {
         "mean": [
-          0.485,
-          0.456,
-          0.406
+          0.4914,
+          0.4822,
+          0.4465
         ],
         "std": [
-          0.229,
-          0.224,
-          0.225
+          0.2470,
+          0.2435,
+          0.2616
         ]
       }
     },
     {
-      "model_name": "densenet121",
-      "num_classes": 1000,
+      "model_name": "vgg11",
+      "num_classes": 10,
       "normalization": {
         "mean": [
-          0.485,
-          0.456,
-          0.406
+          0.4914,
+          0.4822,
+          0.4465
         ],
         "std": [
-          0.229,
-          0.224,
-          0.225
+          0.2470,
+          0.2435,
+          0.2616
         ]
       }
     },
     {
-      "model_name": "mobilenet_v2",
-      "num_classes": 1000,
+      "model_name": "resnet56",
+      "num_classes": 10,
       "normalization": {
         "mean": [
-          0.485,
-          0.456,
-          0.406
+          0.4914,
+          0.4822,
+          0.4465
         ],
         "std": [
-          0.229,
-          0.224,
-          0.225
+          0.2470,
+          0.2435,
+          0.2616
         ]
       }
     }
   ],
   "dataset": {
     "name": "cifar10",
-    "path": null,
+    "path": "./data",
     "num_images": 2000,
     "seed": 42,
-    "image_size": 224
+    "image_size": 32
   },
   "attack": {
     "method": "gfcs",
