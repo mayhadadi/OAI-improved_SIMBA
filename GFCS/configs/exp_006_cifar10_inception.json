@@ -1,0 +1,116 @@
+{
+  "experiment_id": "exp_006",
+  "description": "GFCS attack - Inception-v3 victim on CIFAR-10 (transfer learning test)",
+  "surr_desc": "4 surrogates: VGG-19, ResNet-34, DenseNet-121, MobileNet-v2",
+  "data_desc": "CIFAR-10 test set, 2000 images, seed 42, resized to 224x224",
+  "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto (sqrt(0.001*D)), gradient_normalization=l2, ods_sampling=uniform",
+  "victim": {
+    "model_name": "inception_v3",
+    "num_classes": 1000,
+    "normalization": {
+      "mean": [
+        0.485,
+        0.456,
+        0.406
+      ],
+      "std": [
+        0.229,
+        0.224,
+        0.225
+      ]
+    }
+  },
+  "surrogates": [
+    {
+      "model_name": "vgg19",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "model_name": "resnet34",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "model_name": "densenet121",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "model_name": "mobilenet_v2",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    }
+  ],
+  "dataset": {
+    "name": "cifar10",
+    "path": null,
+    "num_images": 2000,
+    "seed": 42,
+    "image_size": 224
+  },
+  "attack": {
+    "method": "gfcs",
+    "epsilon": 2.0,
+    "max_queries": 10000,
+    "targeted": false,
+    "norm_bound": {
+      "type": "auto",
+      "value": null
+    },
+    "direction_selection": {
+      "method": "standard",
+      "gradient_normalization": "l2",
+      "ods_sampling": "uniform"
+    }
+  },
+  "output": {
+    "save_adversarial_examples": false,
+    "save_perturbations": false,
+    "save_detailed_logs": true
+  }
+}
