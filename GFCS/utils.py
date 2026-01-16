@@ -261,7 +261,20 @@ def get_imagenet_classes() -> List[str]:
         'electric_ray', 'stingray', 'cock', 'hen', 'ostrich'
     ]
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
+class NormalizedModel(nn.Module):
+    """Wrapper that applies normalization before the model."""
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).to(device).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).to(device).view(1, 3, 1, 1))
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = (x - self.mean) / self.std
+        return self.model(x_norm)
+    
 if __name__ == "__main__":
     # Demo visualization functions
     print("Utilities module loaded successfully!")
