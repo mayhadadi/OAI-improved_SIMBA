@@ -1,8 +1,7 @@
 """
-Tiny ImageNet Dataset Loader (Minimal Version)
-===============================================
-Simple loader for Tiny ImageNet that auto-downloads and integrates
-seamlessly with existing ImageNet experiment configs.
+Tiny ImageNet Dataset Loader - FIXED VERSION
+============================================
+Returns UNnormalized images so NormalizedModel can apply normalization once.
 """
 
 import torch
@@ -66,12 +65,15 @@ def load_tiny_imagenet_dataset(
     """
     Load Tiny ImageNet dataset.
     
+    IMPORTANT: Returns UNnormalized images (only ToTensor applied).
+    Normalization will be applied by NormalizedModel wrapper in run_experiment_from_config.py
+    
     Args:
         dataset_path: Path to dataset directory
         download: Whether to download if not present
     
     Returns:
-        dataset: ImageFolder dataset (already normalized)
+        dataset: ImageFolder dataset (UNnormalized - only ToTensor applied)
         label_names: List of class names
     """
     if download:
@@ -85,14 +87,12 @@ def load_tiny_imagenet_dataset(
             f"Tiny ImageNet not found at {imagenet_path}. Set download=True to download."
         )
     
-    # ImageNet normalization (applied in the transform)
-    NORM_MEAN = [0.485, 0.456, 0.406]
-    NORM_STD = [0.229, 0.224, 0.225]
-    
-    # Transform: Images are already 224x224, just need ToTensor + Normalize
+    # FIXED: Only apply ToTensor transform, NO normalization
+    # The NormalizedModel wrapper will apply normalization later
+    # This prevents double normalization which was causing 0.3% accuracy
     transform = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(mean=NORM_MEAN, std=NORM_STD)
+        # DO NOT add Normalize here - it will be applied by NormalizedModel
     ])
     
     # Load dataset
