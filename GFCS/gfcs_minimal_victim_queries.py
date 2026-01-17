@@ -254,14 +254,9 @@ class GFCSMinimalVictimQueries:
             self.victim_queries += 1
             
             if self.is_adversarial(victim_logits, true_class, target_class):
-                print("Input is already adversarial!")
                 return x_adv, self._get_stats(success=True)
-            
-            initial_loss = self.margin_loss(victim_logits, true_class, target_class).item()
         
-        print(f"Initial victim loss: {initial_loss:.4f}")
-        print(f"Starting attack with {len(self.surrogates)} surrogates...")
-        
+        # No verbose printing during attack
         use_ods = False
         gradient_attempts = 0
         max_gradient_attempts = 100  # Switch to ODS after this many failed attempts
@@ -272,7 +267,6 @@ class GFCSMinimalVictimQueries:
             
             # Check if all surrogates are fooled
             if self.check_all_surrogates_fooled(x_adv, true_class, target_class):
-                print(f"\nAll surrogates fooled at iteration {self.iterations}!")
                 break
             
             # Get direction q
@@ -283,7 +277,6 @@ class GFCSMinimalVictimQueries:
             else:
                 # COIMAGE SECOND: ODS sampling
                 if not use_ods:
-                    print(f"\nSwitching to ODS after {gradient_attempts} gradient attempts")
                     use_ods = True
                 q = self.get_ods_direction(x_adv, num_classes)
             
@@ -319,14 +312,7 @@ class GFCSMinimalVictimQueries:
                     if avg_candidate_loss > avg_current_loss:
                         x_adv = x_candidate
                         step_accepted = True
-                        
-                        if self.iterations % 10 == 0:
-                            print(f"Iter {self.iterations}: Avg surrogate loss improved: "
-                                  f"{avg_current_loss:.4f} -> {avg_candidate_loss:.4f}")
                         break
-            
-            if not step_accepted and self.iterations % 10 == 0:
-                print(f"Iter {self.iterations}: No improvement")
         
         # VICTIM QUERY 2: Check if we fooled the victim
         with torch.no_grad():
@@ -334,10 +320,6 @@ class GFCSMinimalVictimQueries:
             self.victim_queries += 1
             
             success = self.is_adversarial(final_victim_logits, true_class, target_class)
-            final_loss = self.margin_loss(final_victim_logits, true_class, target_class).item()
-        
-        print(f"\nFinal victim loss: {final_loss:.4f}")
-        print(f"Success: {success}")
         
         return x_adv, self._get_stats(success=success)
     

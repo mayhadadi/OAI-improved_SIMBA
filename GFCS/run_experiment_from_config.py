@@ -176,6 +176,19 @@ def load_model(model_config: Dict[str, Any], device: str) -> nn.Module:
         model = models.mobilenet_v2(pretrained=True)
         if num_classes != 1000:
             model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    elif model_name == 'alexnet':
+        model = models.alexnet(pretrained=True)
+        if num_classes != 1000:
+            model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
+    elif model_name == 'squeezenet':
+        model = models.squeezenet1_1(pretrained=True)
+        if num_classes != 1000:
+            model.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
+            model.num_classes = num_classes
+    elif model_name == 'shufflenet':
+        model = models.shufflenet_v2_x1_0(pretrained=True)
+        if num_classes != 1000:
+            model.fc = nn.Linear(model.fc.in_features, num_classes)
     else:
         raise ValueError(f"Unknown model: {model_name}")
     
@@ -363,6 +376,7 @@ def run_minimal_victim_attack(
     print(f"Parameters: epsilon={epsilon}, max_iterations={max_iterations}, norm_bound={norm_bound}")
     print(f"Number of samples: {len(samples)}")
     print(f"Number of surrogates: {len(surrogate_models)}")
+    print()
     
     # Create attacker
     attacker = GFCSMinimalVictimQueries(
@@ -389,8 +403,6 @@ def run_minimal_victim_attack(
     
     # Attack each sample
     for idx, (img, true_class) in enumerate(samples):
-        print(f"[{idx+1}/{len(samples)}] Attacking image...", end=' ')
-        
         start_time = time.time()
         
         try:
@@ -411,21 +423,20 @@ def run_minimal_victim_attack(
             pert_norm = torch.norm(delta, p=2).item()
             results['perturbation_norms'].append(pert_norm)
             
+            # One-line output similar to GFCS
             if stats['success']:
-                print(f"✓ SUCCESS - VictimQ:{stats['victim_queries']}, "
-                      f"SurrQ:{stats['surrogate_queries']}, "
-                      f"Iters:{stats['iterations']}, "
+                print(f"[{idx+1}/{len(samples)}] ✓ SUCCESS - VictimQ:{stats['victim_queries']}, "
+                      f"SurrQ:{stats['surrogate_queries']}, Iters:{stats['iterations']}, "
                       f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
             else:
                 results['failed_indices'].append(idx)
-                print(f"✗ FAILED - VictimQ:{stats['victim_queries']}, "
-                      f"SurrQ:{stats['surrogate_queries']}, "
-                      f"Iters:{stats['iterations']}, "
+                print(f"[{idx+1}/{len(samples)}] ✗ FAILED - VictimQ:{stats['victim_queries']}, "
+                      f"SurrQ:{stats['surrogate_queries']}, Iters:{stats['iterations']}, "
                       f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
             
         except Exception as e:
             elapsed_time = time.time() - start_time
-            print(f"✗ ERROR: {str(e)}")
+            print(f"[{idx+1}/{len(samples)}] ✗ ERROR: {str(e)}")
             results['failed_indices'].append(idx)
             results['victim_queries'].append(0)
             results['surrogate_queries'].append(0)
@@ -774,8 +785,8 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     # Print results
     print_results(results, experiment_id, description)
     
-    # Save results
-    if config.get('output', {}).get('save_detailed_logs', True):
+    # Save results only for non-minimal-victim experiments
+    if method != 'gfcs_minimal_victim' and config.get('output', {}).get('save_detailed_logs', True):
         save_results(results, config, output_dir)
     
     return results
