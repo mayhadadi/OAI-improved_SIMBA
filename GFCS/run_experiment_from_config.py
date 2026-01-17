@@ -24,9 +24,9 @@ from typing import List, Tuple, Dict, Any
 import time
 from datetime import datetime
 
+from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_dataset
 from gfcs import GFCS
 from cifar10_models import load_cifar10_model
-
 
 
 class NormalizedModel(nn.Module):
@@ -88,7 +88,7 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     
     # Validate dataset
     dataset_name = config['dataset'].get('name')
-    if dataset_name not in ['cifar10', 'imagenet', 'imagenet_r', 'custom']:
+    if dataset_name not in ['cifar10', 'imagenet', 'imagenet_r', 'tiny_imagenet', 'custom']:
         errors.append(f"Invalid dataset name: {dataset_name}")
     
     # Check dataset path for non-auto datasets
@@ -96,8 +96,7 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
         dataset_path = config['dataset'].get('path')
         if not dataset_path:
             errors.append(f"Dataset path required for {dataset_name}")
-        elif not os.path.exists(dataset_path):
-            errors.append(f"Dataset path does not exist: {dataset_path}")
+        # Don't check if path exists - we'll auto-fallback to Tiny ImageNet
     
     return errors
 
@@ -171,12 +170,7 @@ def load_dataset(dataset_config: Dict[str, Any], device: str) -> List[Tuple[torc
     """
     Load dataset based on configuration.
     
-    Args:
-        dataset_config: Dataset configuration dict
-        device: Device to load data on
-        
-    Returns:
-        List of (image, label) tuples
+    Supports: cifar10, tiny_imagenet, imagenet (auto-fallback to tiny_imagenet), custom
     """
     dataset_name = dataset_config['name']
     num_images = dataset_config['num_images']
@@ -189,13 +183,78 @@ def load_dataset(dataset_config: Dict[str, Any], device: str) -> List[Tuple[torc
     np.random.seed(seed)
     
     if dataset_name == 'cifar10':
+        # CIFAR-10: Auto-download, no normalization (handled by NormalizedModel)
         transform = transforms.Compose([
             transforms.Resize(image_size),
             transforms.ToTensor(),
         ])
         dataset = CIFAR10(root='./data', train=False, download=True, transform=transform)
         
-    elif dataset_name in ['imagenet', 'imagenet_r', 'custom']:
+    elif dataset_name == 'tiny_imagenet':
+        # Tiny ImageNet: Auto-download, pre-normalized
+        print(f"Using Tiny ImageNet...")
+        
+        tiny_dataset, label_names = load_tiny_imagenet_dataset(
+            dataset_path="./data/tiny_imagenet",
+            download=True
+        )
+        
+        # Sample images (Tiny ImageNet is already normalized in the loader)
+        indices = np.random.choice(
+            len(tiny_dataset),
+            size=min(num_images, len(tiny_dataset)),
+            replace=False
+        )
+        
+        samples = []
+        for idx in indices:
+            img, label = tiny_dataset[int(idx)]
+            img = img.unsqueeze(0).to(device)
+            samples.append((img, label))
+        
+        print(f"✓ Loaded {len(samples)} samples from Tiny ImageNet")
+        return samples
+        
+    elif dataset_name in ['imagenet', 'imagenet_r']:
+        # ImageNet / ImageNet-R: Try full dataset, fallback to Tiny ImageNet
+        dataset_path = dataset_config['path']
+        
+        if not os.path.exists(dataset_path):
+            # AUTO-FALLBACK to Tiny ImageNet
+            print(f"⚠️  ImageNet path not found: {dataset_path}")
+            print(f"📥 Automatically using Tiny ImageNet instead...")
+            
+            tiny_dataset, label_names = load_tiny_imagenet_dataset(
+                dataset_path="./data/tiny_imagenet",
+                download=True
+            )
+            
+            # Sample images (already normalized)
+            indices = np.random.choice(
+                len(tiny_dataset),
+                size=min(num_images, len(tiny_dataset)),
+                replace=False
+            )
+            
+            samples = []
+            for idx in indices:
+                img, label = tiny_dataset[int(idx)]
+                img = img.unsqueeze(0).to(device)
+                samples.append((img, label))
+            
+            print(f"✓ Loaded {len(samples)} samples from Tiny ImageNet")
+            return samples
+        
+        # Full ImageNet exists - use it
+        transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+        ])
+        dataset = ImageFolder(root=dataset_path, transform=transform)
+        
+    elif dataset_name == 'custom':
+        # Custom dataset
         transform = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(image_size),
@@ -207,7 +266,7 @@ def load_dataset(dataset_config: Dict[str, Any], device: str) -> List[Tuple[torc
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     
-    # Sample indices
+    # Sample indices (for non-tiny_imagenet datasets)
     indices = np.random.choice(len(dataset), size=min(num_images, len(dataset)), replace=False)
     
     # Load samples
@@ -521,7 +580,7 @@ Examples:
     )
     
     parser.add_argument('experiments', nargs='*', help='Experiment IDs to run (e.g., exp_001)')
-    parser.add_argument('--config_dir', type=str, default='./experiment_configs',
+    parser.add_argument('--config_dir', type=str, default='./configs',
                         help='Directory containing experiment config files')
     parser.add_argument('--output_dir', type=str, default='./experiment_results',
                         help='Directory to save results')

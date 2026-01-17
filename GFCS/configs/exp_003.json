@@ -87,8 +87,8 @@
     }
   ],
   "dataset": {
-    "name": "imagenet",
-    "path": "./data/imagenet/val",
+    "name": "tiny_imagenet",
+    "path": "./data/tiny_imagenet",
     "num_images": 2000,
     "seed": 42,
     "image_size": 224
