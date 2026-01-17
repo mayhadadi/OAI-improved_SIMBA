@@ -1,8 +1,8 @@
 """
-GFCS Experiment Runner (with SimBA support)
+GFCS Experiment Runner (with SimBA and Minimal Victim GFCS support)
 ======================
 Runs experiments based on JSON configuration files.
-Supports both GFCS and SimBA attacks.
+Supports GFCS, SimBA, and GFCS Minimal Victim attacks.
 
 Usage:
     python run_experiment_from_config.py exp_001
@@ -29,6 +29,14 @@ from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_data
 from gfcs import GFCS
 from SimBA import SimBA
 from cifar10_models import load_cifar10_model
+
+# Import minimal victim GFCS
+try:
+    from gfcs_minimal_victim_queries import GFCSMinimalVictimQueries
+    MINIMAL_VICTIM_AVAILABLE = True
+except ImportError:
+    MINIMAL_VICTIM_AVAILABLE = False
+    print("WARNING: gfcs_minimal_victim_queries.py not found. Minimal victim method will not be available.")
 
 
 class NormalizedModel(nn.Module):
@@ -95,8 +103,17 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     
     # Validate attack method
     attack_method = config['attack'].get('method')
-    if attack_method not in ['gfcs', 'simba']:
-        errors.append(f"Invalid attack method: {attack_method}. Must be 'gfcs' or 'simba'")
+    if attack_method not in ['gfcs', 'gfcs_minimal_victim', 'simba']:
+        errors.append(f"Invalid attack method: {attack_method}. Must be 'gfcs', 'gfcs_minimal_victim', or 'simba'")
+    
+    # Check that minimal victim GFCS is available if requested
+    if attack_method == 'gfcs_minimal_victim' and not MINIMAL_VICTIM_AVAILABLE:
+        errors.append("gfcs_minimal_victim method requested but gfcs_minimal_victim_queries.py not found")
+    
+    # Validate max_iterations for minimal victim GFCS
+    if attack_method == 'gfcs_minimal_victim':
+        if 'max_iterations' not in config['attack']:
+            errors.append("'max_iterations' required for gfcs_minimal_victim method")
     
     # Check dataset path for non-auto datasets
     if dataset_name in ['imagenet', 'imagenet_r', 'custom']:
@@ -307,6 +324,134 @@ def filter_correctly_classified(
     return filtered
 
 
+def run_minimal_victim_attack(
+    samples: List[Tuple[torch.Tensor, int]],
+    victim_model: nn.Module,
+    surrogate_models: List[nn.Module],
+    attack_config: Dict[str, Any],
+    device: str
+) -> Dict[str, Any]:
+    """
+    Run GFCS attack with minimal victim queries.
+    
+    Args:
+        samples: List of (image, label) tuples
+        victim_model: Victim model
+        surrogate_models: List of surrogate models
+        attack_config: Attack configuration
+        device: Device to use
+        
+    Returns:
+        Dictionary with attack results
+    """
+    if not MINIMAL_VICTIM_AVAILABLE:
+        raise RuntimeError("gfcs_minimal_victim_queries module not available")
+    
+    # Extract attack parameters
+    epsilon = attack_config.get('epsilon', 2.0)
+    max_iterations = attack_config.get('max_iterations', 1000)
+    targeted = attack_config.get('targeted', False)
+    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto', 'value': None})
+    
+    # Determine norm bound
+    if norm_bound_config['type'] == 'auto':
+        norm_bound = None  # Will be auto-computed
+    else:
+        norm_bound = norm_bound_config.get('value')
+    
+    print(f"\nRunning gfcs_minimal_victim attack...")
+    print(f"Parameters: epsilon={epsilon}, max_iterations={max_iterations}, norm_bound={norm_bound}")
+    print(f"Number of samples: {len(samples)}")
+    print(f"Number of surrogates: {len(surrogate_models)}")
+    
+    # Create attacker
+    attacker = GFCSMinimalVictimQueries(
+        victim_model=victim_model,
+        surrogate_models=surrogate_models,
+        epsilon=epsilon,
+        norm_bound=norm_bound,
+        max_iterations=max_iterations,
+        targeted=targeted,
+        device=device
+    )
+    
+    # Track results
+    results = {
+        'success_count': 0,
+        'total_samples': len(samples),
+        'victim_queries': [],
+        'surrogate_queries': [],
+        'iterations': [],
+        'perturbation_norms': [],
+        'times': [],
+        'failed_indices': []
+    }
+    
+    # Attack each sample
+    for idx, (img, true_class) in enumerate(samples):
+        print(f"[{idx+1}/{len(samples)}] Attacking image...", end=' ')
+        
+        start_time = time.time()
+        
+        try:
+            x_adv, stats = attacker.attack(img, true_class)
+            elapsed_time = time.time() - start_time
+            
+            # Record results
+            if stats['success']:
+                results['success_count'] += 1
+            
+            results['victim_queries'].append(stats['victim_queries'])
+            results['surrogate_queries'].append(stats['surrogate_queries'])
+            results['iterations'].append(stats['iterations'])
+            results['times'].append(elapsed_time)
+            
+            # Compute perturbation norm
+            delta = (x_adv - img).view(1, -1)
+            pert_norm = torch.norm(delta, p=2).item()
+            results['perturbation_norms'].append(pert_norm)
+            
+            if stats['success']:
+                print(f"✓ SUCCESS - VictimQ:{stats['victim_queries']}, "
+                      f"SurrQ:{stats['surrogate_queries']}, "
+                      f"Iters:{stats['iterations']}, "
+                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
+            else:
+                results['failed_indices'].append(idx)
+                print(f"✗ FAILED - VictimQ:{stats['victim_queries']}, "
+                      f"SurrQ:{stats['surrogate_queries']}, "
+                      f"Iters:{stats['iterations']}, "
+                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
+            
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            print(f"✗ ERROR: {str(e)}")
+            results['failed_indices'].append(idx)
+            results['victim_queries'].append(0)
+            results['surrogate_queries'].append(0)
+            results['iterations'].append(0)
+            results['perturbation_norms'].append(0)
+            results['times'].append(elapsed_time)
+    
+    # Compute summary statistics
+    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
+    results['median_victim_queries'] = float(np.median(results['victim_queries']))
+    results['mean_victim_queries'] = float(np.mean(results['victim_queries']))
+    results['median_surrogate_queries'] = float(np.median(results['surrogate_queries']))
+    results['mean_surrogate_queries'] = float(np.mean(results['surrogate_queries']))
+    results['median_iterations'] = float(np.median(results['iterations']))
+    results['mean_iterations'] = float(np.mean(results['iterations']))
+    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
+    results['mean_time'] = float(np.mean(results['times']))
+    
+    # For compatibility with existing code, add query_counts
+    results['query_counts'] = results['victim_queries']
+    results['median_queries'] = results['median_victim_queries']
+    results['mean_queries'] = results['mean_victim_queries']
+    
+    return results
+
+
 def run_attack(
     samples: List[Tuple[torch.Tensor, int]],
     victim_model: nn.Module,
@@ -317,7 +462,7 @@ def run_attack(
     """
     Run attack based on configuration.
     
-    Supports both GFCS and SimBA attacks.
+    Supports GFCS, GFCS Minimal Victim, and SimBA attacks.
     
     Args:
         samples: List of (image, label) tuples
@@ -330,6 +475,12 @@ def run_attack(
         Results dictionary
     """
     method = attack_config.get('method', 'gfcs')
+    
+    # Route to minimal victim GFCS if requested
+    if method == 'gfcs_minimal_victim':
+        return run_minimal_victim_attack(samples, victim_model, surrogate_models, attack_config, device)
+    
+    # Original GFCS and SimBA code
     epsilon = attack_config.get('epsilon', 2.0)
     max_queries = attack_config.get('max_queries', 10000)
     targeted = attack_config.get('targeted', False)
@@ -455,15 +606,27 @@ def print_results(results: Dict[str, Any], experiment_id: str, description: str)
     print(f"Description: {description}")
     print(f"{'='*80}")
     print(f"Success Rate: {results['success_rate']:.2f}% ({results['success_count']}/{results['total_samples']})")
-    print(f"Median Queries: {results['median_queries']:.0f}")
-    print(f"Mean Queries: {results['mean_queries']:.1f}")
     
-    # Only print gradient/coimage stats if they exist (GFCS only)
-    if 'median_gradient_queries' in results:
-        print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
-        print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
+    # Check if this is minimal victim GFCS (has separate victim/surrogate queries)
+    if 'victim_queries' in results and 'surrogate_queries' in results:
+        print(f"\n--- Minimal Victim GFCS Statistics ---")
+        print(f"Median Victim Queries: {results['median_victim_queries']:.1f}")
+        print(f"Mean Victim Queries: {results['mean_victim_queries']:.2f}")
+        print(f"Median Surrogate Queries: {results['median_surrogate_queries']:.1f}")
+        print(f"Mean Surrogate Queries: {results['mean_surrogate_queries']:.2f}")
+        print(f"Median Iterations: {results['median_iterations']:.1f}")
+        print(f"Mean Iterations: {results['mean_iterations']:.2f}")
+    else:
+        # Standard GFCS or SimBA
+        print(f"Median Queries: {results['median_queries']:.0f}")
+        print(f"Mean Queries: {results['mean_queries']:.1f}")
+        
+        # Only print gradient/coimage stats if they exist (GFCS only)
+        if 'median_gradient_queries' in results:
+            print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
+            print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
     
-    print(f"Mean L2 Norm: {results['mean_perturbation_norm']:.2f}")
+    print(f"\nMean L2 Norm: {results['mean_perturbation_norm']:.2f}")
     print(f"Mean Time per Image: {results['mean_time']:.2f}s")
     print(f"Total Time: {sum(results['times']):.2f}s ({sum(results['times'])/60:.1f} minutes)")
     if len(results['failed_indices']) > 0:
@@ -565,9 +728,9 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     print(f"{'-'*80}")
     victim_model = load_model(config['victim'], device)
     
-    # Load surrogate models (only for GFCS)
+    # Load surrogate models (for GFCS and GFCS Minimal Victim)
     surrogate_models = []
-    if method == 'gfcs':
+    if method in ['gfcs', 'gfcs_minimal_victim']:
         print(f"\n{'-'*80}")
         print("LOADING SURROGATE MODELS")
         print(f"{'-'*80}")
@@ -620,7 +783,7 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run GFCS/SimBA experiments from configuration files',
+        description='Run GFCS/SimBA/GFCS-Minimal-Victim experiments from configuration files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -629,6 +792,9 @@ Examples:
   
   # Run multiple experiments
   python run_experiment_from_config.py exp_001 exp_002 exp_003
+  
+  # Run comparison (original vs minimal victim)
+  python run_experiment_from_config.py exp_001 exp_011
   
   # Use custom config directory
   python run_experiment_from_config.py --config_dir ./my_configs exp_001
@@ -662,12 +828,16 @@ Examples:
         return
     
     print("="*80)
-    print("GFCS/SIMBA EXPERIMENT RUNNER")
+    print("GFCS/SIMBA/MINIMAL-VICTIM EXPERIMENT RUNNER")
     print("="*80)
     print(f"Config directory: {args.config_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Device: {args.device}")
     print(f"Experiments to run: {', '.join(args.experiments)}")
+    if MINIMAL_VICTIM_AVAILABLE:
+        print(f"Minimal Victim GFCS: ✓ Available")
+    else:
+        print(f"Minimal Victim GFCS: ✗ Not available (gfcs_minimal_victim_queries.py not found)")
     print("="*80)
     
     # Run each experiment
@@ -707,12 +877,35 @@ Examples:
         print("\n" + "="*80)
         print("SUMMARY OF ALL EXPERIMENTS")
         print("="*80)
-        print(f"{'Experiment':<20} {'Success Rate':<15} {'Median Queries':<15} {'Mean L2':<10}")
-        print("-"*80)
-        for exp_id, result in all_results:
-            print(f"{exp_id:<20} {result['success_rate']:>6.2f}%        "
-                  f"{result['median_queries']:>6.0f}          "
-                  f"{result['mean_perturbation_norm']:>6.2f}")
+        
+        # Check if we have minimal victim experiments
+        has_minimal = any('victim_queries' in result for _, result in all_results)
+        
+        if has_minimal:
+            print(f"{'Experiment':<20} {'Success Rate':<15} {'Victim Q':<12} {'Total Q':<12} {'Mean L2':<10}")
+            print("-"*80)
+            for exp_id, result in all_results:
+                if 'victim_queries' in result:
+                    # Minimal victim GFCS
+                    victim_q = f"{result['median_victim_queries']:.0f}"
+                    total_q = f"{result['median_surrogate_queries']:.0f}"
+                else:
+                    # Original GFCS or SimBA
+                    victim_q = f"{result['median_queries']:.0f}"
+                    total_q = "N/A"
+                
+                print(f"{exp_id:<20} {result['success_rate']:>6.2f}%        "
+                      f"{victim_q:>6}      {total_q:>6}      "
+                      f"{result['mean_perturbation_norm']:>6.2f}")
+        else:
+            # Standard table
+            print(f"{'Experiment':<20} {'Success Rate':<15} {'Median Queries':<15} {'Mean L2':<10}")
+            print("-"*80)
+            for exp_id, result in all_results:
+                print(f"{exp_id:<20} {result['success_rate']:>6.2f}%        "
+                      f"{result['median_queries']:>6.0f}          "
+                      f"{result['mean_perturbation_norm']:>6.2f}")
+        
         print("="*80)
     
     print("\nAll experiments completed!")

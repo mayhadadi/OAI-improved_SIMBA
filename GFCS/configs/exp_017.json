@@ -1,0 +1,116 @@
+{
+    "experiment_id": "exp_017",
+    "description": "GFCS Minimal Victim Queries - VGG-16 victim on ImageNet",
+    "surr_desc": "4 surrogates: VGG-19, ResNet-34, DenseNet-121, MobileNet-v2",
+    "data_desc": "ImageNet validation set, 2000 images, seed 42",
+    "addition_desc": "Minimal victim queries (only 2), averaged gradients, epsilon=2.0, max_iterations=1000",
+    "victim": {
+        "model_name": "vgg16",
+        "num_classes": 1000,
+        "normalization": {
+            "mean": [
+                0.485,
+                0.456,
+                0.406
+            ],
+            "std": [
+                0.229,
+                0.224,
+                0.225
+            ]
+        }
+    },
+    "surrogates": [
+        {
+            "model_name": "vgg19",
+            "num_classes": 1000,
+            "normalization": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            }
+        },
+        {
+            "model_name": "resnet34",
+            "num_classes": 1000,
+            "normalization": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            }
+        },
+        {
+            "model_name": "densenet121",
+            "num_classes": 1000,
+            "normalization": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            }
+        },
+        {
+            "model_name": "mobilenet_v2",
+            "num_classes": 1000,
+            "normalization": {
+                "mean": [
+                    0.485,
+                    0.456,
+                    0.406
+                ],
+                "std": [
+                    0.229,
+                    0.224,
+                    0.225
+                ]
+            }
+        }
+    ],
+    "dataset": {
+        "name": "tiny_imagenet",
+        "path": "./data/tiny_imagenet",
+        "num_images": 2000,
+        "seed": 42,
+        "image_size": 224
+    },
+    "attack": {
+        "method": "gfcs_minimal_victim",
+        "epsilon": 2.0,
+        "max_iterations": 1000,
+        "targeted": false,
+        "norm_bound": {
+            "type": "auto",
+            "value": null
+        },
+        "direction_selection": {
+            "method": "averaged_gradients",
+            "gradient_normalization": "l2",
+            "ods_sampling": "uniform"
+        }
+    },
+    "output": {
+        "save_adversarial_examples": false,
+        "save_perturbations": false,
+        "save_detailed_logs": true
+    }
+}
