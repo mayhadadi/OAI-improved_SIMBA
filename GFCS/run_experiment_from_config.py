@@ -27,7 +27,7 @@ from datetime import datetime
 
 from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_dataset
 from gfcs import GFCS
-from simba import SimBA
+from SimBA import SimBA
 from cifar10_models import load_cifar10_model
 
 
