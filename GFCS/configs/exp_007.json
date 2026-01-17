@@ -1,0 +1,37 @@
+{
+  "experiment_id": "exp_007- licensed to kill the baseline (one pixel at a time).",
+  "description": "SimBA baseline - ResNet-50 victim on Tiny ImageNet",
+  "surr_desc": "No surrogates (black-box only)",
+  "data_desc": "Tiny ImageNet, 2000 images, seed 42",
+  "addition_desc": "SimBA-pixel, epsilon=0.2, max_queries=10000, untargeted",
+  "victim": {
+    "model_name": "resnet50",
+    "num_classes": 1000,
+    "normalization": {
+      "mean": [0.485, 0.456, 0.406],
+      "std": [0.229, 0.224, 0.225]
+    }
+  },
+  "surrogates": [],
+  "dataset": {
+    "name": "tiny_imagenet",
+    "path": "./data/tiny_imagenet",
+    "num_images": 2000,
+    "seed": 42,
+    "image_size": 224
+  },
+  "attack": {
+    "method": "simba",
+    "epsilon": 0.2,
+    "max_queries": 10000,
+    "targeted": false,
+    "pixel_attack": true,
+    "freq_dims": null,
+    "order": "random"
+  },
+  "output": {
+    "save_adversarial_examples": false,
+    "save_perturbations": false,
+    "save_detailed_logs": true
+  }
+}

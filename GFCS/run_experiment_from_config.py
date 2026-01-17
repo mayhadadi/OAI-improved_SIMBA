@@ -1,7 +1,8 @@
 """
-GFCS Experiment Runner
+GFCS Experiment Runner (with SimBA support)
 ======================
 Runs experiments based on JSON configuration files.
+Supports both GFCS and SimBA attacks.
 
 Usage:
     python run_experiment_from_config.py exp_001
@@ -26,6 +27,7 @@ from datetime import datetime
 
 from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_dataset
 from gfcs import GFCS
+from simba import SimBA
 from cifar10_models import load_cifar10_model
 
 
@@ -82,21 +84,25 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     if 'model_name' not in config['victim']:
         errors.append("Missing victim.model_name")
     
-    # Validate surrogates
-    if not isinstance(config['surrogates'], list) or len(config['surrogates']) == 0:
-        errors.append("surrogates must be a non-empty list")
+    # Validate surrogates (can be empty for SimBA)
+    if not isinstance(config['surrogates'], list):
+        errors.append("surrogates must be a list (can be empty for SimBA)")
     
     # Validate dataset
     dataset_name = config['dataset'].get('name')
     if dataset_name not in ['cifar10', 'imagenet', 'imagenet_r', 'tiny_imagenet', 'custom']:
         errors.append(f"Invalid dataset name: {dataset_name}")
     
+    # Validate attack method
+    attack_method = config['attack'].get('method')
+    if attack_method not in ['gfcs', 'simba']:
+        errors.append(f"Invalid attack method: {attack_method}. Must be 'gfcs' or 'simba'")
+    
     # Check dataset path for non-auto datasets
     if dataset_name in ['imagenet', 'imagenet_r', 'custom']:
         dataset_path = config['dataset'].get('path')
         if not dataset_path:
             errors.append(f"Dataset path required for {dataset_name}")
-        # Don't check if path exists - we'll auto-fallback to Tiny ImageNet
     
     return errors
 
@@ -311,10 +317,12 @@ def run_attack(
     """
     Run attack based on configuration.
     
+    Supports both GFCS and SimBA attacks.
+    
     Args:
         samples: List of (image, label) tuples
         victim_model: Victim model
-        surrogate_models: List of surrogate models
+        surrogate_models: List of surrogate models (empty for SimBA)
         attack_config: Attack configuration dict
         device: Device
         
@@ -326,21 +334,23 @@ def run_attack(
     max_queries = attack_config.get('max_queries', 10000)
     targeted = attack_config.get('targeted', False)
     
-    # Get norm bound
-    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto'})
-    if norm_bound_config['type'] == 'auto':
-        norm_bound = None  # Will be computed by GFCS
-    elif norm_bound_config['type'] == 'fixed':
-        norm_bound = norm_bound_config['value']
-    else:
-        norm_bound = None
-    
     print(f"\nRunning {method} attack...")
-    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}, norm_bound={norm_bound}")
+    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}")
     print(f"Number of samples: {len(samples)}")
-    print(f"Number of surrogates: {len(surrogate_models)}")
     
     if method == 'gfcs':
+        # Get norm bound
+        norm_bound_config = attack_config.get('norm_bound', {'type': 'auto'})
+        if norm_bound_config['type'] == 'auto':
+            norm_bound = None  # Will be computed by GFCS
+        elif norm_bound_config['type'] == 'fixed':
+            norm_bound = norm_bound_config['value']
+        else:
+            norm_bound = None
+        
+        print(f"Number of surrogates: {len(surrogate_models)}")
+        print(f"Norm bound: {norm_bound}")
+        
         attacker = GFCS(
             victim_model=victim_model,
             surrogate_models=surrogate_models,
@@ -348,6 +358,29 @@ def run_attack(
             norm_bound=norm_bound,
             max_queries=max_queries,
             targeted=targeted,
+            device=device
+        )
+        
+    elif method == 'simba':
+        # SimBA-specific parameters
+        pixel_attack = attack_config.get('pixel_attack', True)
+        freq_dims = attack_config.get('freq_dims', None)
+        order = attack_config.get('order', 'random')
+        
+        variant = "SimBA-pixel" if pixel_attack else "SimBA-DCT"
+        print(f"Variant: {variant}")
+        print(f"Order: {order}")
+        if not pixel_attack and freq_dims:
+            print(f"Frequency dimensions: {freq_dims}")
+        
+        attacker = SimBA(
+            model=victim_model,
+            epsilon=epsilon,
+            max_queries=max_queries,
+            freq_dims=freq_dims,
+            order=order,
+            targeted=targeted,
+            pixel_attack=pixel_attack,
             device=device
         )
     else:
@@ -374,16 +407,27 @@ def run_attack(
         perturbation_norm = torch.norm(x_adv - img).item()
         
         results['query_counts'].append(stats['total_queries'])
-        results['gradient_query_counts'].append(stats['gradient_queries'])
-        results['coimage_query_counts'].append(stats['coimage_queries'])
         results['perturbation_norms'].append(perturbation_norm)
         results['times'].append(elapsed_time)
         
+        # Handle different stat formats
+        if method == 'gfcs':
+            results['gradient_query_counts'].append(stats['gradient_queries'])
+            results['coimage_query_counts'].append(stats['coimage_queries'])
+        else:
+            # SimBA doesn't have these, use 0
+            results['gradient_query_counts'].append(0)
+            results['coimage_query_counts'].append(0)
+        
         if stats['success']:
             results['success_count'] += 1
-            print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
-                  f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                  f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
+            if method == 'gfcs':
+                print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
+                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
+                      f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
+            else:
+                print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
+                      f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
         else:
             results['failed_indices'].append(i)
             print(f"✗ FAILED - Q:{stats['total_queries']}, "
@@ -393,8 +437,11 @@ def run_attack(
     results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
     results['median_queries'] = float(np.median(results['query_counts']))
     results['mean_queries'] = float(np.mean(results['query_counts']))
-    results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
-    results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
+    
+    if method == 'gfcs':
+        results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
+        results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
+    
     results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
     results['mean_time'] = float(np.mean(results['times']))
     
@@ -410,8 +457,12 @@ def print_results(results: Dict[str, Any], experiment_id: str, description: str)
     print(f"Success Rate: {results['success_rate']:.2f}% ({results['success_count']}/{results['total_samples']})")
     print(f"Median Queries: {results['median_queries']:.0f}")
     print(f"Mean Queries: {results['mean_queries']:.1f}")
-    print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
-    print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
+    
+    # Only print gradient/coimage stats if they exist (GFCS only)
+    if 'median_gradient_queries' in results:
+        print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
+        print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
+    
     print(f"Mean L2 Norm: {results['mean_perturbation_norm']:.2f}")
     print(f"Mean Time per Image: {results['mean_time']:.2f}s")
     print(f"Total Time: {sum(results['times']):.2f}s ({sum(results['times'])/60:.1f} minutes)")
@@ -461,10 +512,11 @@ def list_experiments(config_dir: str):
             desc = config.get('description', 'No description')
             victim = config.get('victim', {}).get('model_name', 'unknown')
             dataset = config.get('dataset', {}).get('name', 'unknown')
+            method = config.get('attack', {}).get('method', 'unknown')
             
             print(f"\n{exp_id}: {config_file.name}")
             print(f"  Description: {desc}")
-            print(f"  Victim: {victim}, Dataset: {dataset}")
+            print(f"  Method: {method}, Victim: {victim}, Dataset: {dataset}")
         except Exception as e:
             print(f"\n{config_file.name}: ERROR - {str(e)}")
     
@@ -496,9 +548,11 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     
     experiment_id = config['experiment_id']
     description = config.get('description', 'No description')
+    method = config['attack']['method']
     
     print(f"Experiment ID: {experiment_id}")
     print(f"Description: {description}")
+    print(f"Attack Method: {method}")
     
     # Set seed
     seed = config['dataset']['seed']
@@ -511,15 +565,20 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     print(f"{'-'*80}")
     victim_model = load_model(config['victim'], device)
     
-    # Load surrogate models
-    print(f"\n{'-'*80}")
-    print("LOADING SURROGATE MODELS")
-    print(f"{'-'*80}")
+    # Load surrogate models (only for GFCS)
     surrogate_models = []
-    for i, surrogate_config in enumerate(config['surrogates']):
-        print(f"Surrogate {i+1}/{len(config['surrogates'])}: ", end='')
-        surrogate_model = load_model(surrogate_config, device)
-        surrogate_models.append(surrogate_model)
+    if method == 'gfcs':
+        print(f"\n{'-'*80}")
+        print("LOADING SURROGATE MODELS")
+        print(f"{'-'*80}")
+        for i, surrogate_config in enumerate(config['surrogates']):
+            print(f"Surrogate {i+1}/{len(config['surrogates'])}: ", end='')
+            surrogate_model = load_model(surrogate_config, device)
+            surrogate_models.append(surrogate_model)
+    else:
+        print(f"\n{'-'*80}")
+        print("SIMBA ATTACK (No surrogates needed)")
+        print(f"{'-'*80}")
     
     # Load dataset
     print(f"\n{'-'*80}")
@@ -561,7 +620,7 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run GFCS experiments from configuration files',
+        description='Run GFCS/SimBA experiments from configuration files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -603,7 +662,7 @@ Examples:
         return
     
     print("="*80)
-    print("GFCS EXPERIMENT RUNNER")
+    print("GFCS/SIMBA EXPERIMENT RUNNER")
     print("="*80)
     print(f"Config directory: {args.config_dir}")
     print(f"Output directory: {args.output_dir}")
