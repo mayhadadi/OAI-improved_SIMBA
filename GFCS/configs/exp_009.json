@@ -3,7 +3,7 @@
   "description": "SimBA baseline - Inception-v3 victim on Tiny ImageNet",
   "surr_desc": "No surrogates (black-box only)",
   "data_desc": "Tiny ImageNet, 2000 images, seed 42",
-  "addition_desc": "SimBA-pixel, epsilon=0.2, max_queries=10000, untargeted",
+  "addition_desc": "SimBA-pixel, epsilon=0.2, max_queries=20000, untargeted",
   "victim": {
     "model_name": "inception_v3",
     "num_classes": 1000,
@@ -23,7 +23,7 @@
   "attack": {
     "method": "simba",
     "epsilon": 0.2,
-    "max_queries": 10000,
+    "max_queries": 20000,
     "targeted": false,
     "pixel_attack": true,
     "freq_dims": null,

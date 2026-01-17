@@ -39,7 +39,7 @@ class SimBA:
     Args:
         model: victim model (expects input shape (1, C, H, W))
         epsilon: step size (default: 0.2)
-        max_queries: query budget (default: 10000)
+        max_queries: query budget (default: 20000)
         freq_dims: number of DCT directions to consider (only used if pixel_attack=False)
         freq_fraction: if freq_dims is None, use this fraction of lowest frequencies (default: 1/8)
         order: 'random' (paper default) or 'diag' (deterministic low->high frequency traversal)
@@ -55,7 +55,7 @@ class SimBA:
         self,
         model: nn.Module,
         epsilon: float = 0.2,
-        max_queries: int = 10000,
+        max_queries: int = 20000,
         freq_dims: Optional[int] = None,
         freq_fraction: float = 1.0 / 8.0,
         order: str = "random",

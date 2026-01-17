@@ -1,11 +1,11 @@
 {
-  "experiment_id": "exp_007- licensed to kill the baseline (one pixel at a time).",
-  "description": "SimBA baseline - ResNet-50 victim on Tiny ImageNet",
+  "experiment_id": "exp_015",
+  "description": "SimBA-DCT baseline - Inception-v3 victim on Tiny ImageNet",
   "surr_desc": "No surrogates (black-box only)",
   "data_desc": "Tiny ImageNet, 2000 images, seed 42",
-  "addition_desc": "SimBA-pixel, epsilon=0.2, max_queries=20000, untargeted",
+  "addition_desc": "SimBA-DCT, epsilon=0.2, max_queries=20000, untargeted, freq_dims=1/8 (paper default)",
   "victim": {
-    "model_name": "resnet50",
+    "model_name": "inception_v3",
     "num_classes": 1000,
     "normalization": {
       "mean": [0.485, 0.456, 0.406],
@@ -25,8 +25,9 @@
     "epsilon": 0.2,
     "max_queries": 20000,
     "targeted": false,
-    "pixel_attack": true,
+    "pixel_attack": false,
     "freq_dims": null,
+    "freq_fraction": 0.125,
     "order": "random"
   },
   "output": {
