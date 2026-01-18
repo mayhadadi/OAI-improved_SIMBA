@@ -1,7 +1,7 @@
 {
-    "experiment_id": "exp_025",
+    "experiment_id": "exp_026",
     "description": "GFCS averaged gradients - Inception-v3 victim on ImageNet",
-    "surr_desc": "7 surrogates: VGG-19, VGG-16, ResNet-152, ResNet-50, ResNet-34, DenseNet-121, MobileNet-v2",
+    "surr_desc": "10 surrogates: All available pretrained ImageNet models except Inception-v3",
     "data_desc": "ImageNet validation set, 50 images, seed 42",
     "addition_desc": "averaged gradients, epsilon=2.0, max_iterations=1000",
     "victim": {
@@ -75,6 +75,54 @@
       "normalization": {
         "mean": [0.485, 0.456, 0.406],
         "std": [0.229, 0.224, 0.225]
+      }
+    },
+    {
+      "model_name": "alexnet",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "model_name": "squeezenet",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "model_name": "alexnet",
+      "num_classes": 1000,
+      "normalization": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
       }
     }
   ],

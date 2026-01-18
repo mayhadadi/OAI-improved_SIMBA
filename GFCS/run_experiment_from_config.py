@@ -1,8 +1,8 @@
 """
-GFCS Experiment Runner (with SimBA and Minimal Victim GFCS support)
+GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, and Averaged Gradients GFCS support)
 ======================
 Runs experiments based on JSON configuration files.
-Supports GFCS, SimBA, and GFCS Minimal Victim attacks.
+Supports GFCS, GFCS Averaged Gradients, SimBA, and GFCS Minimal Victim attacks.
 
 Usage:
     python run_experiment_from_config.py exp_001
@@ -29,6 +29,14 @@ from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_data
 from gfcs import GFCS
 from SimBA import SimBA
 from cifar10_models import load_cifar10_model
+
+# Import averaged gradients GFCS
+try:
+    from gfcs_averaged_gradients import GFCSAveragedGradients
+    AVERAGED_GRADIENTS_AVAILABLE = True
+except ImportError:
+    AVERAGED_GRADIENTS_AVAILABLE = False
+    print("WARNING: gfcs_averaged_gradients.py not found. Averaged gradients method will not be available.")
 
 # Import minimal victim GFCS
 try:
@@ -103,8 +111,13 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     
     # Validate attack method
     attack_method = config['attack'].get('method')
-    if attack_method not in ['gfcs', 'gfcs_minimal_victim', 'simba']:
-        errors.append(f"Invalid attack method: {attack_method}. Must be 'gfcs', 'gfcs_minimal_victim', or 'simba'")
+    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'simba']
+    if attack_method not in valid_methods:
+        errors.append(f"Invalid attack method: {attack_method}. Must be one of {valid_methods}")
+    
+    # Check that averaged gradients GFCS is available if requested
+    if attack_method == 'gfcs_averaged_gradients' and not AVERAGED_GRADIENTS_AVAILABLE:
+        errors.append("gfcs_averaged_gradients method requested but gfcs_averaged_gradients.py not found")
     
     # Check that minimal victim GFCS is available if requested
     if attack_method == 'gfcs_minimal_victim' and not MINIMAL_VICTIM_AVAILABLE:
@@ -473,7 +486,7 @@ def run_attack(
     """
     Run attack based on configuration.
     
-    Supports GFCS, GFCS Minimal Victim, and SimBA attacks.
+    Supports GFCS, GFCS Averaged Gradients, GFCS Minimal Victim, and SimBA attacks.
     
     Args:
         samples: List of (image, label) tuples
@@ -491,7 +504,7 @@ def run_attack(
     if method == 'gfcs_minimal_victim':
         return run_minimal_victim_attack(samples, victim_model, surrogate_models, attack_config, device)
     
-    # Original GFCS and SimBA code
+    # Original GFCS, GFCS Averaged Gradients, and SimBA code
     epsilon = attack_config.get('epsilon', 2.0)
     max_queries = attack_config.get('max_queries', 10000)
     targeted = attack_config.get('targeted', False)
@@ -514,6 +527,34 @@ def run_attack(
         print(f"Norm bound: {norm_bound}")
         
         attacker = GFCS(
+            victim_model=victim_model,
+            surrogate_models=surrogate_models,
+            epsilon=epsilon,
+            norm_bound=norm_bound,
+            max_queries=max_queries,
+            targeted=targeted,
+            device=device
+        )
+    
+    elif method == 'gfcs_averaged_gradients':
+        # GFCS with averaged gradients from all surrogates
+        if not AVERAGED_GRADIENTS_AVAILABLE:
+            raise RuntimeError("gfcs_averaged_gradients module not available")
+        
+        # Get norm bound
+        norm_bound_config = attack_config.get('norm_bound', {'type': 'auto'})
+        if norm_bound_config['type'] == 'auto':
+            norm_bound = None  # Will be computed by GFCS
+        elif norm_bound_config['type'] == 'fixed':
+            norm_bound = norm_bound_config['value']
+        else:
+            norm_bound = None
+        
+        print(f"Number of surrogates: {len(surrogate_models)}")
+        print(f"Norm bound: {norm_bound}")
+        print(f"Using AVERAGED gradients from all surrogates")
+        
+        attacker = GFCSAveragedGradients(
             victim_model=victim_model,
             surrogate_models=surrogate_models,
             epsilon=epsilon,
@@ -573,7 +614,7 @@ def run_attack(
         results['times'].append(elapsed_time)
         
         # Handle different stat formats
-        if method == 'gfcs':
+        if method in ['gfcs', 'gfcs_averaged_gradients']:
             results['gradient_query_counts'].append(stats['gradient_queries'])
             results['coimage_query_counts'].append(stats['coimage_queries'])
         else:
@@ -583,7 +624,7 @@ def run_attack(
         
         if stats['success']:
             results['success_count'] += 1
-            if method == 'gfcs':
+            if method in ['gfcs', 'gfcs_averaged_gradients']:
                 print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
                       f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
                       f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
@@ -600,7 +641,7 @@ def run_attack(
     results['median_queries'] = float(np.median(results['query_counts']))
     results['mean_queries'] = float(np.mean(results['query_counts']))
     
-    if method == 'gfcs':
+    if method in ['gfcs', 'gfcs_averaged_gradients']:
         results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
         results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
     
@@ -628,11 +669,11 @@ def print_results(results: Dict[str, Any], experiment_id: str, description: str)
         print(f"Median Iterations: {results['median_iterations']:.1f}")
         print(f"Mean Iterations: {results['mean_iterations']:.2f}")
     else:
-        # Standard GFCS or SimBA
+        # Standard GFCS, GFCS Averaged Gradients, or SimBA
         print(f"Median Queries: {results['median_queries']:.0f}")
         print(f"Mean Queries: {results['mean_queries']:.1f}")
         
-        # Only print gradient/coimage stats if they exist (GFCS only)
+        # Only print gradient/coimage stats if they exist (GFCS and GFCS Averaged Gradients)
         if 'median_gradient_queries' in results:
             print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
             print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
@@ -739,9 +780,9 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     print(f"{'-'*80}")
     victim_model = load_model(config['victim'], device)
     
-    # Load surrogate models (for GFCS and GFCS Minimal Victim)
+    # Load surrogate models (for GFCS variants)
     surrogate_models = []
-    if method in ['gfcs', 'gfcs_minimal_victim']:
+    if method in ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim']:
         print(f"\n{'-'*80}")
         print("LOADING SURROGATE MODELS")
         print(f"{'-'*80}")
@@ -785,8 +826,8 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     # Print results
     print_results(results, experiment_id, description)
     
-    # Save results only for non-minimal-victim experiments
-    if method != 'gfcs_minimal_victim' and config.get('output', {}).get('save_detailed_logs', True):
+    # Save results
+    if config.get('output', {}).get('save_detailed_logs', True):
         save_results(results, config, output_dir)
     
     return results
@@ -794,7 +835,7 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run GFCS/SimBA/GFCS-Minimal-Victim experiments from configuration files',
+        description='Run GFCS/GFCS-Averaged/SimBA/GFCS-Minimal-Victim experiments from configuration files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -804,8 +845,8 @@ Examples:
   # Run multiple experiments
   python run_experiment_from_config.py exp_001 exp_002 exp_003
   
-  # Run comparison (original vs minimal victim)
-  python run_experiment_from_config.py exp_001 exp_011
+  # Run comparison (original GFCS vs averaged gradients GFCS)
+  python run_experiment_from_config.py exp_001 exp_002
   
   # Use custom config directory
   python run_experiment_from_config.py --config_dir ./my_configs exp_001
@@ -839,16 +880,19 @@ Examples:
         return
     
     print("="*80)
-    print("GFCS/SIMBA/MINIMAL-VICTIM EXPERIMENT RUNNER")
+    print("GFCS EXPERIMENT RUNNER")
     print("="*80)
     print(f"Config directory: {args.config_dir}")
     print(f"Output directory: {args.output_dir}")
     print(f"Device: {args.device}")
     print(f"Experiments to run: {', '.join(args.experiments)}")
-    if MINIMAL_VICTIM_AVAILABLE:
-        print(f"Minimal Victim GFCS: ✓ Available")
-    else:
-        print(f"Minimal Victim GFCS: ✗ Not available (gfcs_minimal_victim_queries.py not found)")
+    
+    # Print availability of methods
+    print("\nAvailable Methods:")
+    print(f"  - GFCS (Original): ✓ Available")
+    print(f"  - GFCS Averaged Gradients: {'✓ Available' if AVERAGED_GRADIENTS_AVAILABLE else '✗ Not available'}")
+    print(f"  - GFCS Minimal Victim: {'✓ Available' if MINIMAL_VICTIM_AVAILABLE else '✗ Not available'}")
+    print(f"  - SimBA: ✓ Available")
     print("="*80)
     
     # Run each experiment
@@ -910,11 +954,17 @@ Examples:
                       f"{result['mean_perturbation_norm']:>6.2f}")
         else:
             # Standard table
-            print(f"{'Experiment':<20} {'Success Rate':<15} {'Median Queries':<15} {'Mean L2':<10}")
-            print("-"*80)
+            print(f"{'Experiment':<25} {'Method':<20} {'Success':<12} {'Median Q':<12} {'Mean L2':<10}")
+            print("-"*90)
             for exp_id, result in all_results:
-                print(f"{exp_id:<20} {result['success_rate']:>6.2f}%        "
-                      f"{result['median_queries']:>6.0f}          "
+                # Infer method from results (this is approximate)
+                if 'median_gradient_queries' in result:
+                    method_name = "GFCS"
+                else:
+                    method_name = "SimBA"
+                
+                print(f"{exp_id:<25} {method_name:<20} {result['success_rate']:>6.2f}%     "
+                      f"{result['median_queries']:>6.0f}       "
                       f"{result['mean_perturbation_norm']:>6.2f}")
         
         print("="*80)
