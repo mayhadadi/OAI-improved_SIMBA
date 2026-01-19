@@ -2,7 +2,7 @@
     "experiment_id": "exp_026",
     "description": "GFCS averaged gradients - Inception-v3 victim on ImageNet",
     "surr_desc": "10 surrogates: All available pretrained ImageNet models except Inception-v3",
-    "data_desc": "ImageNet validation set, 50 images, seed 42",
+    "data_desc": "ImageNet validation set, 2000 images, seed 42",
     "addition_desc": "averaged gradients, epsilon=2.0, max_iterations=1000",
     "victim": {
         "model_name": "inception_v3",
@@ -129,7 +129,7 @@
     "dataset": {
         "name": "tiny_imagenet",
         "path": "./data/tiny_imagenet",
-        "num_images": 50,
+        "num_images": 2000,
         "seed": 42,
         "image_size": 224
     },
