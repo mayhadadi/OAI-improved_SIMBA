@@ -1,8 +1,8 @@
 """
-GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, and Averaged Gradients GFCS support)
+GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, Averaged Gradients GFCS, and Adaptive GFCS support)
 ======================
 Runs experiments based on JSON configuration files.
-Supports GFCS, GFCS Averaged Gradients, SimBA, and GFCS Minimal Victim attacks.
+Supports GFCS, GFCS Averaged Gradients, GFCS Adaptive, SimBA, and GFCS Minimal Victim attacks.
 
 Usage:
     python run_experiment_from_config.py exp_001
@@ -45,6 +45,14 @@ try:
 except ImportError:
     MINIMAL_VICTIM_AVAILABLE = False
     print("WARNING: gfcs_minimal_victim_queries.py not found. Minimal victim method will not be available.")
+
+# Import adaptive GFCS
+try:
+    from gfcs_adaptive import GFCSAdaptive, GFCSAdaptiveAblation
+    ADAPTIVE_AVAILABLE = True
+except ImportError:
+    ADAPTIVE_AVAILABLE = False
+    print("WARNING: gfcs_adaptive.py not found. Adaptive GFCS method will not be available.")
 
 
 class NormalizedModel(nn.Module):
@@ -111,7 +119,8 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     
     # Validate attack method
     attack_method = config['attack'].get('method')
-    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'simba']
+    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'gfcs_adaptive', 
+                     'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only', 'simba']
     if attack_method not in valid_methods:
         errors.append(f"Invalid attack method: {attack_method}. Must be one of {valid_methods}")
     
@@ -122,6 +131,10 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     # Check that minimal victim GFCS is available if requested
     if attack_method == 'gfcs_minimal_victim' and not MINIMAL_VICTIM_AVAILABLE:
         errors.append("gfcs_minimal_victim method requested but gfcs_minimal_victim_queries.py not found")
+    
+    # Check that adaptive GFCS is available if requested
+    if attack_method in ['gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only'] and not ADAPTIVE_AVAILABLE:
+        errors.append(f"{attack_method} method requested but gfcs_adaptive.py not found")
     
     # Validate max_iterations for minimal victim GFCS
     if attack_method == 'gfcs_minimal_victim':
@@ -359,16 +372,6 @@ def run_minimal_victim_attack(
 ) -> Dict[str, Any]:
     """
     Run GFCS attack with minimal victim queries.
-    
-    Args:
-        samples: List of (image, label) tuples
-        victim_model: Victim model
-        surrogate_models: List of surrogate models
-        attack_config: Attack configuration
-        device: Device to use
-        
-    Returns:
-        Dictionary with attack results
     """
     if not MINIMAL_VICTIM_AVAILABLE:
         raise RuntimeError("gfcs_minimal_victim_queries module not available")
@@ -476,6 +479,164 @@ def run_minimal_victim_attack(
     return results
 
 
+def run_adaptive_attack(
+    samples: List[Tuple[torch.Tensor, int]],
+    victim_model: nn.Module,
+    surrogate_models: List[nn.Module],
+    attack_config: Dict[str, Any],
+    device: str
+) -> Dict[str, Any]:
+    """
+    Run GFCS-Adaptive attack with adaptive surrogate weighting and smart ODS.
+    
+    Supports three variants:
+    - gfcs_adaptive: Full adaptive (weighting + smart ODS)
+    - gfcs_adaptive_weighting_only: Only adaptive surrogate weighting
+    - gfcs_adaptive_smart_ods_only: Only smart ODS fallback
+    """
+    if not ADAPTIVE_AVAILABLE:
+        raise RuntimeError("gfcs_adaptive module not available")
+    
+    method = attack_config.get('method', 'gfcs_adaptive')
+    
+    # Extract attack parameters
+    epsilon = attack_config.get('epsilon', 2.0)
+    max_queries = attack_config.get('max_queries', 10000)
+    targeted = attack_config.get('targeted', False)
+    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto', 'value': None})
+    
+    # Determine norm bound
+    if norm_bound_config['type'] == 'auto':
+        norm_bound = None
+    else:
+        norm_bound = norm_bound_config.get('value')
+    
+    # Get adaptive-specific parameters
+    adaptive_params = attack_config.get('adaptive_params', {})
+    trust_learning_rate = adaptive_params.get('trust_learning_rate', 0.3)
+    trust_decay = adaptive_params.get('trust_decay', 0.8)
+    ods_momentum = adaptive_params.get('ods_momentum', 0.5)
+    
+    # Determine which improvements to use based on method
+    if method == 'gfcs_adaptive':
+        use_adaptive_weighting = True
+        use_smart_ods = True
+    elif method == 'gfcs_adaptive_weighting_only':
+        use_adaptive_weighting = True
+        use_smart_ods = False
+    elif method == 'gfcs_adaptive_smart_ods_only':
+        use_adaptive_weighting = False
+        use_smart_ods = True
+    else:
+        use_adaptive_weighting = adaptive_params.get('use_adaptive_weighting', True)
+        use_smart_ods = adaptive_params.get('use_smart_ods', True)
+    
+    print(f"\nRunning {method} attack...")
+    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}, norm_bound={norm_bound}")
+    print(f"Adaptive params: trust_lr={trust_learning_rate}, trust_decay={trust_decay}, ods_momentum={ods_momentum}")
+    print(f"Use adaptive weighting: {use_adaptive_weighting}")
+    print(f"Use smart ODS: {use_smart_ods}")
+    print(f"Number of samples: {len(samples)}")
+    print(f"Number of surrogates: {len(surrogate_models)}")
+    print()
+    
+    # Create attacker
+    attacker = GFCSAdaptive(
+        victim_model=victim_model,
+        surrogate_models=surrogate_models,
+        epsilon=epsilon,
+        norm_bound=norm_bound,
+        max_queries=max_queries,
+        targeted=targeted,
+        device=device,
+        trust_learning_rate=trust_learning_rate,
+        trust_decay=trust_decay,
+        ods_momentum=ods_momentum,
+        use_adaptive_weighting=use_adaptive_weighting,
+        use_smart_ods=use_smart_ods
+    )
+    
+    # Track results
+    results = {
+        'success_count': 0,
+        'total_samples': len(samples),
+        'query_counts': [],
+        'gradient_query_counts': [],
+        'coimage_query_counts': [],
+        'perturbation_norms': [],
+        'times': [],
+        'failed_indices': [],
+        'trust_scores_history': []  # Track how trust scores evolve
+    }
+    
+    # Attack each sample
+    for idx, (img, true_class) in enumerate(samples):
+        start_time = time.time()
+        
+        try:
+            x_adv, stats = attacker.attack(img, true_class)
+            elapsed_time = time.time() - start_time
+            
+            # Record results
+            if stats['success']:
+                results['success_count'] += 1
+            else:
+                results['failed_indices'].append(idx)
+            
+            results['query_counts'].append(stats['total_queries'])
+            results['gradient_query_counts'].append(stats['gradient_queries'])
+            results['coimage_query_counts'].append(stats['coimage_queries'])
+            results['times'].append(elapsed_time)
+            
+            # Save trust scores if available
+            if 'trust_scores' in stats:
+                results['trust_scores_history'].append(stats['trust_scores'])
+            
+            # Compute perturbation norm
+            delta = (x_adv - img).view(1, -1)
+            pert_norm = torch.norm(delta, p=2).item()
+            results['perturbation_norms'].append(pert_norm)
+            
+            # One-line output
+            if stats['success']:
+                print(f"[{idx+1}/{len(samples)}] ✓ SUCCESS - Q:{stats['total_queries']}, "
+                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
+                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
+            else:
+                print(f"[{idx+1}/{len(samples)}] ✗ FAILED - Q:{stats['total_queries']}, "
+                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
+                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
+            
+        except Exception as e:
+            elapsed_time = time.time() - start_time
+            print(f"[{idx+1}/{len(samples)}] ✗ ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            results['failed_indices'].append(idx)
+            results['query_counts'].append(max_queries)
+            results['gradient_query_counts'].append(0)
+            results['coimage_query_counts'].append(0)
+            results['perturbation_norms'].append(0)
+            results['times'].append(elapsed_time)
+    
+    # Compute summary statistics
+    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
+    results['median_queries'] = float(np.median(results['query_counts']))
+    results['mean_queries'] = float(np.mean(results['query_counts']))
+    results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
+    results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
+    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
+    results['mean_time'] = float(np.mean(results['times']))
+    
+    # Compute final trust scores statistics
+    if results['trust_scores_history']:
+        final_trust = results['trust_scores_history'][-1]
+        results['final_trust_scores'] = final_trust
+        results['trust_score_variance'] = float(np.var(final_trust))
+    
+    return results
+
+
 def run_attack(
     samples: List[Tuple[torch.Tensor, int]],
     victim_model: nn.Module,
@@ -486,7 +647,7 @@ def run_attack(
     """
     Run attack based on configuration.
     
-    Supports GFCS, GFCS Averaged Gradients, GFCS Minimal Victim, and SimBA attacks.
+    Supports GFCS, GFCS Averaged Gradients, GFCS Adaptive, GFCS Minimal Victim, and SimBA attacks.
     
     Args:
         samples: List of (image, label) tuples
@@ -503,6 +664,10 @@ def run_attack(
     # Route to minimal victim GFCS if requested
     if method == 'gfcs_minimal_victim':
         return run_minimal_victim_attack(samples, victim_model, surrogate_models, attack_config, device)
+    
+    # Route to adaptive GFCS if requested
+    if method in ['gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only']:
+        return run_adaptive_attack(samples, victim_model, surrogate_models, attack_config, device)
     
     # Original GFCS, GFCS Averaged Gradients, and SimBA code
     epsilon = attack_config.get('epsilon', 2.0)
@@ -669,14 +834,20 @@ def print_results(results: Dict[str, Any], experiment_id: str, description: str)
         print(f"Median Iterations: {results['median_iterations']:.1f}")
         print(f"Mean Iterations: {results['mean_iterations']:.2f}")
     else:
-        # Standard GFCS, GFCS Averaged Gradients, or SimBA
+        # Standard GFCS, GFCS Averaged Gradients, GFCS Adaptive, or SimBA
         print(f"Median Queries: {results['median_queries']:.0f}")
         print(f"Mean Queries: {results['mean_queries']:.1f}")
         
-        # Only print gradient/coimage stats if they exist (GFCS and GFCS Averaged Gradients)
+        # Only print gradient/coimage stats if they exist
         if 'median_gradient_queries' in results:
             print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
             print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
+    
+    # Print trust scores if available (GFCS Adaptive)
+    if 'final_trust_scores' in results:
+        print(f"\n--- Adaptive GFCS Statistics ---")
+        print(f"Final Trust Scores: {[f'{t:.2f}' for t in results['final_trust_scores']]}")
+        print(f"Trust Score Variance: {results['trust_score_variance']:.4f}")
     
     print(f"\nMean L2 Norm: {results['mean_perturbation_norm']:.2f}")
     print(f"Mean Time per Image: {results['mean_time']:.2f}s")
@@ -782,7 +953,8 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     
     # Load surrogate models (for GFCS variants)
     surrogate_models = []
-    if method in ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim']:
+    if method in ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 
+                  'gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only']:
         print(f"\n{'-'*80}")
         print("LOADING SURROGATE MODELS")
         print(f"{'-'*80}")
@@ -835,7 +1007,7 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run GFCS/GFCS-Averaged/SimBA/GFCS-Minimal-Victim experiments from configuration files',
+        description='Run GFCS/GFCS-Averaged/GFCS-Adaptive/SimBA/GFCS-Minimal-Victim experiments from configuration files',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -845,8 +1017,11 @@ Examples:
   # Run multiple experiments
   python run_experiment_from_config.py exp_001 exp_002 exp_003
   
-  # Run comparison (original GFCS vs averaged gradients GFCS)
-  python run_experiment_from_config.py exp_001 exp_002
+  # Run GFCS-Adaptive experiment
+  python run_experiment_from_config.py exp_gfcs_adaptive
+  
+  # Run comparison (original GFCS vs adaptive GFCS)
+  python run_experiment_from_config.py exp_003 exp_gfcs_adaptive
   
   # Use custom config directory
   python run_experiment_from_config.py --config_dir ./my_configs exp_001
@@ -891,6 +1066,7 @@ Examples:
     print("\nAvailable Methods:")
     print(f"  - GFCS (Original): ✓ Available")
     print(f"  - GFCS Averaged Gradients: {'✓ Available' if AVERAGED_GRADIENTS_AVAILABLE else '✗ Not available'}")
+    print(f"  - GFCS Adaptive: {'✓ Available' if ADAPTIVE_AVAILABLE else '✗ Not available'}")
     print(f"  - GFCS Minimal Victim: {'✓ Available' if MINIMAL_VICTIM_AVAILABLE else '✗ Not available'}")
     print(f"  - SimBA: ✓ Available")
     print("="*80)
@@ -954,16 +1130,18 @@ Examples:
                       f"{result['mean_perturbation_norm']:>6.2f}")
         else:
             # Standard table
-            print(f"{'Experiment':<25} {'Method':<20} {'Success':<12} {'Median Q':<12} {'Mean L2':<10}")
-            print("-"*90)
+            print(f"{'Experiment':<25} {'Method':<25} {'Success':<12} {'Median Q':<12} {'Mean L2':<10}")
+            print("-"*95)
             for exp_id, result in all_results:
-                # Infer method from results (this is approximate)
-                if 'median_gradient_queries' in result:
+                # Infer method from results
+                if 'final_trust_scores' in result:
+                    method_name = "GFCS-Adaptive"
+                elif 'median_gradient_queries' in result:
                     method_name = "GFCS"
                 else:
                     method_name = "SimBA"
                 
-                print(f"{exp_id:<25} {method_name:<20} {result['success_rate']:>6.2f}%     "
+                print(f"{exp_id:<25} {method_name:<25} {result['success_rate']:>6.2f}%     "
                       f"{result['median_queries']:>6.0f}       "
                       f"{result['mean_perturbation_norm']:>6.2f}")
         

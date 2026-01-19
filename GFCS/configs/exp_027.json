@@ -1,5 +1,5 @@
 {
-    "experiment_id": "exp_018",
+    "experiment_id": "exp_027",
     "description": "GFCS averaged gradients - Inception-v3 victim on ImageNet",
     "surr_desc": "4 surrogates: VGG-19, ResNet-34, DenseNet-121, MobileNet-v2",
     "data_desc": "ImageNet validation set, 2000 images, seed 42",
