@@ -15,6 +15,11 @@ Enhanced implementation of GFCS with two key improvements:
 
 Based on: "Attacking Deep Networks with Surrogate-Based Adversarial Black-Box Methods is Easy"
 (Lord et al., ICLR 2022)
+
+v2 Changes:
+- Better surrogate differentiation: only credit individual surrogates, not groups
+- Adjusted trust dynamics: lower learning rate, higher decay sensitivity
+- Track actual success/attempt ratios per surrogate
 """
 
 import torch
@@ -29,17 +34,7 @@ class GFCSAdaptive:
     """
     GFCS with Adaptive Surrogate Weighting and Smarter ODS Fallback.
     
-    Key Improvements:
-    1. Adaptive Surrogate Weighting:
-       - Each surrogate has a "trust score" initialized to 1.0
-       - When a surrogate's gradient leads to successful victim update, increase trust
-       - When it fails, decrease trust
-       - Use trust scores to weight gradient contributions
-       
-    2. Smarter ODS Fallback:
-       - Track successful ODS weight vectors
-       - Use momentum: bias new ODS samples towards successful directions
-       - Adaptive class weighting based on margin structure
+    v2: Improved surrogate differentiation
     
     Args:
         victim_model: The black-box victim model (only used for forward passes/queries)
@@ -50,9 +45,9 @@ class GFCSAdaptive:
         targeted: Whether this is a targeted attack
         device: torch device
         
-        # New adaptive parameters
-        trust_learning_rate: How fast trust scores adapt (default: 0.3)
-        trust_decay: Decay factor for failed attempts (default: 0.8)
+        # Adaptive parameters
+        trust_learning_rate: How fast trust scores adapt (default: 0.1, reduced from 0.3)
+        trust_decay: Decay factor for failed attempts (default: 0.95, increased from 0.8)
         ods_momentum: Momentum for ODS direction memory (default: 0.5)
         use_adaptive_weighting: Enable adaptive surrogate weighting
         use_smart_ods: Enable smarter ODS fallback
@@ -67,9 +62,9 @@ class GFCSAdaptive:
         max_queries: int = 10000,
         targeted: bool = False,
         device: str = 'cuda' if torch.cuda.is_available() else 'cpu',
-        # Adaptive parameters
-        trust_learning_rate: float = 0.3,
-        trust_decay: float = 0.8,
+        # Adaptive parameters - adjusted defaults for better differentiation
+        trust_learning_rate: float = 0.1,  # Reduced from 0.3
+        trust_decay: float = 0.95,  # Increased from 0.8 (less aggressive decay)
         ods_momentum: float = 0.5,
         use_adaptive_weighting: bool = True,
         use_smart_ods: bool = True
@@ -90,21 +85,21 @@ class GFCSAdaptive:
         self.use_adaptive_weighting = use_adaptive_weighting
         self.use_smart_ods = use_smart_ods
         
-        # Initialize trust scores for each surrogate (Improvement #3)
+        # Initialize trust scores for each surrogate (start at 1.0)
         self.surrogate_trust = torch.ones(self.num_surrogates, device=device)
         
-        # ODS memory for smarter fallback (Improvement #4)
-        self.ods_success_weights = None  # Will store successful ODS weight vectors
-        self.ods_momentum_direction = None  # Momentum from successful ODS steps
+        # Track actual success/attempt counts per surrogate (for analysis)
+        self.surrogate_successes = torch.zeros(self.num_surrogates, device=device)
+        self.surrogate_attempts = torch.zeros(self.num_surrogates, device=device)
+        
+        # ODS memory for smarter fallback
+        self.ods_success_weights = None
+        self.ods_momentum_direction = None
         
         # Statistics tracking
         self.query_count = 0
         self.gradient_queries = 0
         self.coimage_queries = 0
-        
-        # Detailed statistics for analysis
-        self.surrogate_success_counts = torch.zeros(self.num_surrogates, device=device)
-        self.surrogate_attempt_counts = torch.zeros(self.num_surrogates, device=device)
         
     def reset_statistics(self):
         """Reset per-attack statistics but keep learned trust scores."""
@@ -117,8 +112,8 @@ class GFCSAdaptive:
     def reset_trust_scores(self):
         """Reset trust scores to initial values (for new attack campaigns)."""
         self.surrogate_trust = torch.ones(self.num_surrogates, device=self.device)
-        self.surrogate_success_counts = torch.zeros(self.num_surrogates, device=self.device)
-        self.surrogate_attempt_counts = torch.zeros(self.num_surrogates, device=self.device)
+        self.surrogate_successes = torch.zeros(self.num_surrogates, device=self.device)
+        self.surrogate_attempts = torch.zeros(self.num_surrogates, device=self.device)
         
     def margin_loss(
         self, 
@@ -167,16 +162,13 @@ class GFCSAdaptive:
         surrogate_indices: Optional[List[int]] = None
     ) -> torch.Tensor:
         """
-        IMPROVEMENT #3: Adaptive Surrogate Weighting
-        
         Compute weighted combination of surrogate gradients based on trust scores.
-        Surrogates that have historically predicted victim behavior better get higher weights.
         """
         if surrogate_indices is None:
             surrogate_indices = list(range(self.num_surrogates))
             
         if not self.use_adaptive_weighting or len(surrogate_indices) == 1:
-            # Fall back to simple averaging or single surrogate
+            # Simple averaging or single surrogate
             grads = []
             for idx in surrogate_indices:
                 grad = self.get_surrogate_gradient(x, self.surrogates[idx], true_class, target_class)
@@ -195,9 +187,10 @@ class GFCSAdaptive:
             grads.append(grad)
             weights.append(self.surrogate_trust[idx].item())
         
-        # Normalize weights to sum to 1
+        # Softmax weights with temperature for sharper differentiation
         weights = torch.tensor(weights, device=self.device)
-        weights = F.softmax(weights, dim=0)  # Softmax to handle varying scales
+        temperature = 0.5  # Lower = sharper differentiation
+        weights = F.softmax(weights / temperature, dim=0)
         
         # Weighted combination
         combined = torch.zeros_like(grads[0])
@@ -211,30 +204,26 @@ class GFCSAdaptive:
             
         return combined
     
-    def update_trust_scores(
-        self,
-        successful_indices: List[int],
-        failed_indices: List[int]
-    ):
+    def update_trust_single(self, surrogate_idx: int, success: bool):
         """
-        Update trust scores based on which surrogates' gradients led to success/failure.
+        Update trust score for a SINGLE surrogate based on its individual performance.
+        This is the key change for better differentiation.
         """
         if not self.use_adaptive_weighting:
             return
+        
+        self.surrogate_attempts[surrogate_idx] += 1
+        
+        if success:
+            # Increase trust for this specific surrogate
+            self.surrogate_successes[surrogate_idx] += 1
+            self.surrogate_trust[surrogate_idx] += self.trust_lr
+        else:
+            # Decrease trust for this specific surrogate
+            self.surrogate_trust[surrogate_idx] *= self.trust_decay
             
-        # Increase trust for successful surrogates
-        for idx in successful_indices:
-            self.surrogate_trust[idx] += self.trust_lr
-            self.surrogate_success_counts[idx] += 1
-            self.surrogate_attempt_counts[idx] += 1
-            
-        # Decrease trust for failed surrogates
-        for idx in failed_indices:
-            self.surrogate_trust[idx] *= self.trust_decay
-            self.surrogate_attempt_counts[idx] += 1
-            
-        # Clamp trust scores to reasonable range
-        self.surrogate_trust = torch.clamp(self.surrogate_trust, min=0.1, max=5.0)
+        # Clamp to reasonable range [0.1, 3.0] - reduced upper bound
+        self.surrogate_trust = torch.clamp(self.surrogate_trust, min=0.1, max=3.0)
     
     def get_smart_ods_direction(
         self,
@@ -245,40 +234,32 @@ class GFCSAdaptive:
         target_class: Optional[int] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        IMPROVEMENT #4: Smarter ODS Fallback
-        
-        Instead of purely random ODS sampling, use information from:
-        1. Previously successful ODS weight vectors (momentum)
-        2. Margin-aware class weighting (focus on classes near decision boundary)
-        3. Anti-correlated sampling (avoid directions that failed)
-        
-        Returns: (ods_direction, weight_vector)
+        Smarter ODS Fallback with margin-aware sampling and momentum.
         """
         x_input = x.clone().detach().requires_grad_(True)
         
-        # Get current logits to inform smart sampling
+        # Get current logits for smart sampling
         with torch.no_grad():
             logits = surrogate(x_input)
             probs = F.softmax(logits, dim=1)
         
         if self.use_smart_ods:
-            # Strategy 1: Margin-aware weighting
-            # Give higher weight to classes near the decision boundary
+            # Margin-aware weighting
             w = torch.empty(num_classes, device=self.device).uniform_(-1, 1)
             
-            # Boost weights for top-k classes (more likely to affect decision)
+            # Boost weights for top-k classes
             top_k = min(10, num_classes)
             top_indices = probs[0].topk(top_k).indices
             w[top_indices] *= 2.0
             
-            # Reduce weight on true class (we want to move away from it)
+            # Reduce weight on true class
             w[true_class] = -abs(w[true_class]) - 0.5
             
-            # If targeted, boost target class
+            # Boost target class for targeted attacks
             if self.targeted and target_class is not None:
                 w[target_class] = abs(w[target_class]) + 0.5
             
-            # Strategy 2: Apply momentum from successful ODS directions
+            # Apply momentum from successful ODS directions
             if self.ods_success_weights is not None and self.ods_momentum > 0:
                 w = (1 - self.ods_momentum) * w + self.ods_momentum * self.ods_success_weights
         else:
@@ -296,7 +277,7 @@ class GFCSAdaptive:
         if grad_norm > 0:
             grad = grad / grad_norm
             
-        # Apply momentum from successful ODS steps
+        # Apply direction momentum
         if self.use_smart_ods and self.ods_momentum_direction is not None:
             grad = (1 - self.ods_momentum) * grad + self.ods_momentum * self.ods_momentum_direction
             grad = grad / torch.norm(grad)
@@ -359,11 +340,10 @@ class GFCSAdaptive:
         """
         Run the GFCS-Adaptive attack.
         
-        Enhanced Algorithm:
-        1. Try weighted gradient from all surrogates (adaptive weighting)
-        2. If that fails, try individual surrogate gradients (ordered by trust)
-        3. If all gradients fail, use smart ODS (momentum + margin-aware)
-        4. Update trust scores and ODS memory based on outcomes
+        v2 Algorithm Changes:
+        - Try individual surrogates in trust order (not weighted combination first)
+        - Only credit the specific surrogate that worked
+        - Better differentiation between surrogate quality
         """
         self.reset_statistics()
         
@@ -384,7 +364,7 @@ class GFCSAdaptive:
         with torch.no_grad():
             num_classes = self.surrogates[0](x_adv).shape[1]
         
-        # Initial victim query to check if already adversarial
+        # Initial victim query
         logits = self.query_victim(x_adv)
         current_loss = self.margin_loss(logits, true_class, target_class).item()
         
@@ -394,25 +374,22 @@ class GFCSAdaptive:
                 'total_queries': self.query_count,
                 'gradient_queries': 0,
                 'coimage_queries': 0,
-                'final_loss': current_loss
+                'final_loss': current_loss,
+                'trust_scores': self.surrogate_trust.cpu().numpy().tolist(),
+                'surrogate_success_rates': self._get_success_rates()
             }
-        
-        # Track which surrogates to try (ordered by trust)
-        surrogate_order = torch.argsort(self.surrogate_trust, descending=True).tolist()
-        remaining_surrogates = set(surrogate_order)
         
         while self.query_count < self.max_queries:
             step_successful = False
             
-            # PHASE 1: Try weighted gradient from remaining surrogates
-            if remaining_surrogates:
-                # Get weighted gradient using adaptive weighting
-                q = self.get_weighted_gradient(
-                    x_adv, true_class, target_class, 
-                    list(remaining_surrogates)
-                )
+            # Get surrogate order by trust (highest first)
+            surrogate_order = torch.argsort(self.surrogate_trust, descending=True).tolist()
+            
+            # PHASE 1: Try individual surrogate gradients in trust order
+            for surr_idx in surrogate_order:
+                q = self.get_surrogate_gradient(x_adv, self.surrogates[surr_idx], true_class, target_class)
                 
-                # Try both directions (SimBA-style)
+                # Track that we're attempting with this surrogate
                 for alpha in [self.epsilon, -self.epsilon]:
                     x_candidate = self.project_onto_ball(x_adv + alpha * q, x_orig, norm_bound)
                     logits = self.query_victim(x_candidate)
@@ -424,71 +401,59 @@ class GFCSAdaptive:
                         current_loss = new_loss
                         step_successful = True
                         
-                        # Update trust scores - all remaining surrogates contributed
-                        self.update_trust_scores(list(remaining_surrogates), [])
-                        
-                        # Reset remaining surrogates for next iteration
-                        remaining_surrogates = set(surrogate_order)
+                        # Credit only THIS surrogate
+                        self.update_trust_single(surr_idx, success=True)
                         break
-                    
+                        
                     if self.is_adversarial(logits, true_class, target_class):
-                        self.update_trust_scores(list(remaining_surrogates), [])
+                        self.update_trust_single(surr_idx, success=True)
                         return x_adv, {
                             'success': True,
                             'total_queries': self.query_count,
                             'gradient_queries': self.gradient_queries,
                             'coimage_queries': self.coimage_queries,
                             'final_loss': current_loss,
-                            'trust_scores': self.surrogate_trust.cpu().numpy().tolist()
+                            'trust_scores': self.surrogate_trust.cpu().numpy().tolist(),
+                            'surrogate_success_rates': self._get_success_rates()
                         }
                 
-                if not step_successful:
-                    # Weighted gradient didn't work - try individual surrogates by trust order
-                    for surr_idx in surrogate_order:
-                        if surr_idx not in remaining_surrogates:
-                            continue
-                            
-                        q = self.get_surrogate_gradient(
-                            x_adv, self.surrogates[surr_idx], true_class, target_class
-                        )
-                        
-                        for alpha in [self.epsilon, -self.epsilon]:
-                            x_candidate = self.project_onto_ball(x_adv + alpha * q, x_orig, norm_bound)
-                            logits = self.query_victim(x_candidate)
-                            self.gradient_queries += 1
-                            new_loss = self.margin_loss(logits, true_class, target_class).item()
-                            
-                            if new_loss > current_loss:
-                                x_adv = x_candidate
-                                current_loss = new_loss
-                                step_successful = True
-                                
-                                # This surrogate worked!
-                                self.update_trust_scores([surr_idx], [])
-                                remaining_surrogates = set(surrogate_order)
-                                break
-                                
-                            if self.is_adversarial(logits, true_class, target_class):
-                                self.update_trust_scores([surr_idx], [])
-                                return x_adv, {
-                                    'success': True,
-                                    'total_queries': self.query_count,
-                                    'gradient_queries': self.gradient_queries,
-                                    'coimage_queries': self.coimage_queries,
-                                    'final_loss': current_loss,
-                                    'trust_scores': self.surrogate_trust.cpu().numpy().tolist()
-                                }
-                        
-                        if step_successful:
-                            break
-                        else:
-                            # This surrogate failed
-                            remaining_surrogates.discard(surr_idx)
-                            self.update_trust_scores([], [surr_idx])
+                if step_successful:
+                    break
+                else:
+                    # This surrogate's gradient didn't help
+                    self.update_trust_single(surr_idx, success=False)
             
-            # PHASE 2: Smart ODS Fallback (all gradients exhausted)
+            # PHASE 2: If no individual gradient worked, try weighted combination
             if not step_successful:
-                # Pick surrogate for ODS (weighted by trust)
+                q = self.get_weighted_gradient(x_adv, true_class, target_class)
+                
+                for alpha in [self.epsilon, -self.epsilon]:
+                    x_candidate = self.project_onto_ball(x_adv + alpha * q, x_orig, norm_bound)
+                    logits = self.query_victim(x_candidate)
+                    self.gradient_queries += 1
+                    new_loss = self.margin_loss(logits, true_class, target_class).item()
+                    
+                    if new_loss > current_loss:
+                        x_adv = x_candidate
+                        current_loss = new_loss
+                        step_successful = True
+                        # Don't update individual trust here - it's a group effort
+                        break
+                        
+                    if self.is_adversarial(logits, true_class, target_class):
+                        return x_adv, {
+                            'success': True,
+                            'total_queries': self.query_count,
+                            'gradient_queries': self.gradient_queries,
+                            'coimage_queries': self.coimage_queries,
+                            'final_loss': current_loss,
+                            'trust_scores': self.surrogate_trust.cpu().numpy().tolist(),
+                            'surrogate_success_rates': self._get_success_rates()
+                        }
+            
+            # PHASE 3: Smart ODS Fallback
+            if not step_successful:
+                # Pick surrogate weighted by trust
                 surr_probs = F.softmax(self.surrogate_trust, dim=0)
                 surr_idx = torch.multinomial(surr_probs, 1).item()
                 
@@ -508,11 +473,8 @@ class GFCSAdaptive:
                         current_loss = new_loss
                         step_successful = True
                         
-                        # Update ODS memory with successful direction
+                        # Update ODS memory
                         self.update_ods_memory(w, q)
-                        
-                        # Reset surrogates for gradient phase
-                        remaining_surrogates = set(surrogate_order)
                         break
                         
                     if self.is_adversarial(logits, true_class, target_class):
@@ -523,7 +485,8 @@ class GFCSAdaptive:
                             'gradient_queries': self.gradient_queries,
                             'coimage_queries': self.coimage_queries,
                             'final_loss': current_loss,
-                            'trust_scores': self.surrogate_trust.cpu().numpy().tolist()
+                            'trust_scores': self.surrogate_trust.cpu().numpy().tolist(),
+                            'surrogate_success_rates': self._get_success_rates()
                         }
         
         # Attack failed
@@ -533,8 +496,20 @@ class GFCSAdaptive:
             'gradient_queries': self.gradient_queries,
             'coimage_queries': self.coimage_queries,
             'final_loss': current_loss,
-            'trust_scores': self.surrogate_trust.cpu().numpy().tolist()
+            'trust_scores': self.surrogate_trust.cpu().numpy().tolist(),
+            'surrogate_success_rates': self._get_success_rates()
         }
+    
+    def _get_success_rates(self) -> List[float]:
+        """Get per-surrogate success rates."""
+        rates = []
+        for i in range(self.num_surrogates):
+            if self.surrogate_attempts[i] > 0:
+                rate = (self.surrogate_successes[i] / self.surrogate_attempts[i]).item()
+            else:
+                rate = 0.0
+            rates.append(rate)
+        return rates
 
 
 class GFCSAdaptiveAblation(GFCSAdaptive):
