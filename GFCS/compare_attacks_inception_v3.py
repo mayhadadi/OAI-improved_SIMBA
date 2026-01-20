@@ -182,13 +182,15 @@ def main():
     print(f"  Total queries: {stats_gfcs['total_queries']}")
     print(f"  Gradient queries: {stats_gfcs['gradient_queries']}")
     print(f"  Coimage queries: {stats_gfcs['coimage_queries']}")
-    print(f"  Final loss: {stats_gfcs['final_loss']:.4f}")
     
     if stats_gfcs['success']:
         adv_class_gfcs, adv_conf_gfcs = get_prediction(victim, x_adv_gfcs, device)
         l2_norm_gfcs = torch.norm(x_adv_gfcs - img_tensor).item()
         print(f"  Adversarial class: {adv_class_gfcs} (confidence: {adv_conf_gfcs:.2%})")
         print(f"  L2 perturbation: {l2_norm_gfcs:.4f}")
+    else:
+        print(f"  Attack failed - no adversarial example found")
+        adv_class_gfcs, adv_conf_gfcs, l2_norm_gfcs = None, None, None
     
     # ========================================
     # Attack 2: GFCS-WeightedAlignment
@@ -224,6 +226,9 @@ def main():
         l2_norm_weighted = torch.norm(x_adv_weighted - img_tensor).item()
         print(f"  Adversarial class: {adv_class_weighted} (confidence: {adv_conf_weighted:.2%})")
         print(f"  L2 perturbation: {l2_norm_weighted:.4f}")
+    else:
+        print(f"  Attack failed - no adversarial example found")
+        adv_class_weighted, adv_conf_weighted, l2_norm_weighted = None, None, None
     
     # ========================================
     # Comparison Summary
@@ -232,20 +237,37 @@ def main():
     print("COMPARISON SUMMARY")
     print("="*70)
     
+    print(f"{'Metric':<30} {'GFCS':<20} {'WeightedAlignment':<20}")
+    print("-"*70)
+    
+    success_gfcs = '✓' if stats_gfcs['success'] else '✗'
+    success_weighted = '✓' if stats_weighted['success'] else '✗'
+    print(f"{'Success':<30} {success_gfcs:<20} {success_weighted:<20}")
+    print(f"{'Total Queries':<30} {stats_gfcs['total_queries']:<20} {stats_weighted['total_queries']:<20}")
+    print(f"{'Gradient Queries':<30} {stats_gfcs['gradient_queries']:<20} {stats_weighted['gradient_queries']:<20}")
+    print(f"{'Coimage Queries':<30} {stats_gfcs['coimage_queries']:<20} {stats_weighted['coimage_queries']:<20}")
+    
     if stats_gfcs['success'] and stats_weighted['success']:
-        print(f"{'Metric':<30} {'GFCS':<20} {'WeightedAlignment':<20}")
-        print("-"*70)
-        print(f"{'Success':<30} {'✓':<20} {'✓':<20}")
-        print(f"{'Total Queries':<30} {stats_gfcs['total_queries']:<20} {stats_weighted['total_queries']:<20}")
-        print(f"{'Gradient Queries':<30} {stats_gfcs['gradient_queries']:<20} {stats_weighted['gradient_queries']:<20}")
-        print(f"{'Coimage Queries':<30} {stats_gfcs['coimage_queries']:<20} {stats_weighted['coimage_queries']:<20}")
         print(f"{'L2 Perturbation':<30} {l2_norm_gfcs:<20.4f} {l2_norm_weighted:<20.4f}")
         print(f"{'Adversarial Class':<30} {adv_class_gfcs:<20} {adv_class_weighted:<20}")
         
         # Calculate query reduction
         query_reduction = ((stats_gfcs['total_queries'] - stats_weighted['total_queries']) / 
                           stats_gfcs['total_queries'] * 100)
-        print(f"\nQuery reduction: {query_reduction:+.1f}%")
+        print(f"\n⚡ Query reduction: {query_reduction:+.1f}%")
+        
+        if l2_norm_weighted < l2_norm_gfcs:
+            print(f"⚡ WeightedAlignment achieved {((l2_norm_gfcs - l2_norm_weighted) / l2_norm_gfcs * 100):.1f}% smaller perturbation")
+    elif stats_gfcs['success']:
+        print(f"{'L2 Perturbation':<30} {l2_norm_gfcs:<20.4f} {'N/A':<20}")
+        print(f"{'Adversarial Class':<30} {adv_class_gfcs:<20} {'N/A':<20}")
+        print("\n⚠ Only GFCS succeeded")
+    elif stats_weighted['success']:
+        print(f"{'L2 Perturbation':<30} {'N/A':<20} {l2_norm_weighted:<20.4f}")
+        print(f"{'Adversarial Class':<30} {'N/A':<20} {adv_class_weighted:<20}")
+        print("\n⚠ Only WeightedAlignment succeeded")
+    else:
+        print("\n⚠ Both attacks failed")
     
     # ========================================
     # Visualization
