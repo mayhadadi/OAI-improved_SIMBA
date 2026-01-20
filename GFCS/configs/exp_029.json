@@ -89,7 +89,7 @@
   "dataset": {
     "name": "tiny_imagenet",
     "path": "./data/tiny_imagenet",
-    "num_images": 100,
+    "num_images": 500,
     "seed": 42,
     "image_size": 224
   },
