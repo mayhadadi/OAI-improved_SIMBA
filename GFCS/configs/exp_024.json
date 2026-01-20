@@ -110,7 +110,7 @@
       }
     },
     {
-      "model_name": "alexnet",
+      "model_name": "shufflenet",
       "num_classes": 1000,
       "normalization": {
         "mean": [
