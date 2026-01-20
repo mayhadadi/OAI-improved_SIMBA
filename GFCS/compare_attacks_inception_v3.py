@@ -189,17 +189,11 @@ def main():
         
         plt.tight_layout()
         plt.savefig('attack_comparison.png', dpi=150, bbox_inches='tight')
-        plt.close()
         
         print("✓ Saved: attack_comparison.png")
-        
-        # Display
-        try:
-            from IPython.display import display, Image
-            print("\n" + "="*70)
-            display(Image(filename='attack_comparison.png'))
-        except:
-            pass
+        print("\n" + "="*70)
+        plt.show()  # This will display in Colab
+        plt.close()
         
         # Print summary
         query_reduction = (stats_gfcs['total_queries'] - stats_weighted['total_queries']) / stats_gfcs['total_queries'] * 100
