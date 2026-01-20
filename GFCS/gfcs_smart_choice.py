@@ -1,1281 +1,305 @@
 """
-GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, Averaged Gradients GFCS, and Weighted Alignment GFCS support)
-======================
-Runs experiments based on JSON configuration files.
-Supports GFCS, GFCS Averaged Gradients, GFCS Weighted Alignment, SimBA, and GFCS Minimal Victim attacks.
+GFCS-SmartChoice: Gradient First, Coimage Second with Smart Surrogate Selection
+================================================================================
+Modification of GFCS that selects surrogates based on output similarity to victim
+instead of random selection.
 
-Usage:
-    python run_experiment_from_config.py exp_001
-    python run_experiment_from_config.py exp_001 exp_002 exp_003
-    python run_experiment_from_config.py --config_dir ./my_configs exp_001
-    python run_experiment_from_config.py --list  # List all available experiments
+Key change from original GFCS:
+- Original: Randomly sample surrogate from S_rem (line 7)
+- SmartChoice: Pick surrogate with highest output similarity to victim
+
+This requires just 1 extra victim query at the start to compute similarities.
+The surrogate selection is then deterministic based on similarity ranking.
+
+Based on: "Attacking Deep Networks with Surrogate-Based Adversarial Black-Box Methods is Easy"
+(Lord et al., ICLR 2022)
 """
 
 import torch
 import torch.nn as nn
-import torchvision.models as models
-import torchvision.transforms as transforms
-from torchvision.datasets import CIFAR10, ImageFolder
+import torch.nn.functional as F
+from typing import List, Tuple, Optional
 import numpy as np
-import json
-import argparse
-import os
-from pathlib import Path
-from typing import List, Tuple, Dict, Any
-import time
-from datetime import datetime
-
-from tiny_imagenet_loader import download_tiny_imagenet, load_tiny_imagenet_dataset
-from gfcs import GFCS
-from SimBA import SimBA
-from cifar10_models import load_cifar10_model
-
-# Import averaged gradients GFCS
-try:
-    from gfcs_averaged_gradients import GFCSAveragedGradients
-    AVERAGED_GRADIENTS_AVAILABLE = True
-except ImportError:
-    AVERAGED_GRADIENTS_AVAILABLE = False
-    print("WARNING: gfcs_averaged_gradients.py not found. Averaged gradients method will not be available.")
-
-# Import minimal victim GFCS
-try:
-    from gfcs_minimal_victim_queries import GFCSMinimalVictimQueries
-    MINIMAL_VICTIM_AVAILABLE = True
-except ImportError:
-    MINIMAL_VICTIM_AVAILABLE = False
-    print("WARNING: gfcs_minimal_victim_queries.py not found. Minimal victim method will not be available.")
-
-# Import weighted alignment GFCS
-try:
-    from gfcs_weighted_alignment import GFCSWeightedAlignment, GFCSWeightedAlignmentAblation
-    WEIGHTED_ALIGNMENT_AVAILABLE = True
-except ImportError:
-    WEIGHTED_ALIGNMENT_AVAILABLE = False
-    print("WARNING: gfcs_weighted_alignment.py not found. Weighted alignment method will not be available.")
-
-# Import smart choice GFCS
-try:
-    from gfcs_smart_choice import GFCSSmartChoice
-    SMART_CHOICE_AVAILABLE = True
-except ImportError:
-    SMART_CHOICE_AVAILABLE = False
-    print("WARNING: gfcs_smart_choice.py not found. Smart choice method will not be available.")
 
 
-class NormalizedModel(nn.Module):
-    """Wrapper that applies normalization before the model."""
-    def __init__(self, model: nn.Module, mean: List[float], std: List[float]):
-        super().__init__()
-        self.model = model
-        self.register_buffer('mean', torch.tensor(mean).view(1, 3, 1, 1))
-        self.register_buffer('std', torch.tensor(std).view(1, 3, 1, 1))
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x_norm = (x - self.mean) / self.std
-        return self.model(x_norm)
-
-
-def set_seed(seed: int):
-    """Set random seed for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    import random
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def load_config(config_path: str) -> Dict[str, Any]:
-    """Load experiment configuration from JSON file."""
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-    return config
-
-
-def validate_config(config: Dict[str, Any]) -> List[str]:
+class GFCSSmartChoice:
     """
-    Validate experiment configuration.
+    GFCS with Smart Surrogate Selection based on output similarity.
     
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
-    
-    # Check required top-level fields
-    required_fields = ['experiment_id', 'victim', 'surrogates', 'dataset', 'attack']
-    for field in required_fields:
-        if field not in config:
-            errors.append(f"Missing required field: {field}")
-    
-    if errors:
-        return errors
-    
-    # Validate victim
-    if 'model_name' not in config['victim']:
-        errors.append("Missing victim.model_name")
-    
-    # Validate surrogates (can be empty for SimBA)
-    if not isinstance(config['surrogates'], list):
-        errors.append("surrogates must be a list (can be empty for SimBA)")
-    
-    # Validate dataset
-    dataset_name = config['dataset'].get('name')
-    if dataset_name not in ['cifar10', 'imagenet', 'imagenet_r', 'tiny_imagenet', 'custom']:
-        errors.append(f"Invalid dataset name: {dataset_name}")
-    
-    # Validate attack method
-    attack_method = config['attack'].get('method')
-    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'gfcs_weighted_alignment', 
-                     'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only', 'gfcs_smart_choice', 'simba']
-    if attack_method not in valid_methods:
-        errors.append(f"Invalid attack method: {attack_method}. Must be one of {valid_methods}")
-    
-    # Check that averaged gradients GFCS is available if requested
-    if attack_method == 'gfcs_averaged_gradients' and not AVERAGED_GRADIENTS_AVAILABLE:
-        errors.append("gfcs_averaged_gradients method requested but gfcs_averaged_gradients.py not found")
-    
-    # Check that minimal victim GFCS is available if requested
-    if attack_method == 'gfcs_minimal_victim' and not MINIMAL_VICTIM_AVAILABLE:
-        errors.append("gfcs_minimal_victim method requested but gfcs_minimal_victim_queries.py not found")
-    
-    # Check that weighted alignment GFCS is available if requested
-    if attack_method in ['gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only'] and not WEIGHTED_ALIGNMENT_AVAILABLE:
-        errors.append(f"{attack_method} method requested but gfcs_weighted_alignment.py not found")
-    
-    # Check that smart choice GFCS is available if requested
-    if attack_method == 'gfcs_smart_choice' and not SMART_CHOICE_AVAILABLE:
-        errors.append("gfcs_smart_choice method requested but gfcs_smart_choice.py not found")
-    
-    # Validate max_iterations for minimal victim GFCS
-    if attack_method == 'gfcs_minimal_victim':
-        if 'max_iterations' not in config['attack']:
-            errors.append("'max_iterations' required for gfcs_minimal_victim method")
-    
-    # Check dataset path for non-auto datasets
-    if dataset_name in ['imagenet', 'imagenet_r', 'custom']:
-        dataset_path = config['dataset'].get('path')
-        if not dataset_path:
-            errors.append(f"Dataset path required for {dataset_name}")
-    
-    return errors
-
-
-def load_model(model_config: Dict[str, Any], device: str) -> nn.Module:
-    """
-    Load a model based on configuration.
+    Instead of randomly sampling surrogates, we:
+    1. At the start, query victim and all surrogates
+    2. Compute cosine similarity between victim and each surrogate's output
+    3. Try surrogates in order of similarity (most similar first)
     
     Args:
-        model_config: Model configuration dict
-        device: Device to load model on
-        
-    Returns:
-        Loaded model
+        victim_model: The black-box victim model
+        surrogate_models: List of surrogate models with accessible gradients
+        epsilon: Step size for perturbations (default: 2.0)
+        norm_bound: L2 norm bound for total perturbation
+        max_queries: Maximum number of queries to victim model
+        targeted: Whether this is a targeted attack
+        device: torch device
     """
-    model_name = model_config['model_name']
-    num_classes = model_config.get('num_classes', 1000)
     
-    print(f"Loading {model_name} (num_classes={num_classes})...")
-    
-    # Load CIFAR-10 pretrained models if num_classes=10
-    if num_classes == 10:
-        model = load_cifar10_model(model_name, device)
-    # Load ImageNet pretrained models
-    elif model_name == 'resnet50':
-        model = models.resnet50(pretrained=True)
-        if num_classes != 1000:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif model_name == 'resnet34':
-        model = models.resnet34(pretrained=True)
-        if num_classes != 1000:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif model_name == 'resnet152':
-        model = models.resnet152(pretrained=True)
-        if num_classes != 1000:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif model_name == 'vgg16':
-        model = models.vgg16(pretrained=True)
-        if num_classes != 1000:
-            model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
-    elif model_name == 'vgg19':
-        model = models.vgg19(pretrained=True)
-        if num_classes != 1000:
-            model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
-    elif model_name == 'inception_v3':
-        model = models.inception_v3(pretrained=True)
-        if num_classes != 1000:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
-    elif model_name == 'densenet121':
-        model = models.densenet121(pretrained=True)
-        if num_classes != 1000:
-            model.classifier = nn.Linear(model.classifier.in_features, num_classes)
-    elif model_name == 'mobilenet_v2':
-        model = models.mobilenet_v2(pretrained=True)
-        if num_classes != 1000:
-            model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-    elif model_name == 'alexnet':
-        model = models.alexnet(pretrained=True)
-        if num_classes != 1000:
-            model.classifier[6] = nn.Linear(model.classifier[6].in_features, num_classes)
-    elif model_name == 'squeezenet':
-        model = models.squeezenet1_1(pretrained=True)
-        if num_classes != 1000:
-            model.classifier[1] = nn.Conv2d(512, num_classes, kernel_size=(1,1), stride=(1,1))
-            model.num_classes = num_classes
-    elif model_name == 'shufflenet':
-        model = models.shufflenet_v2_x1_0(pretrained=True)
-        if num_classes != 1000:
-            model.fc = nn.Linear(model.fc.in_features, num_classes)
-    else:
-        raise ValueError(f"Unknown model: {model_name}")
-    
-    model = model.to(device).eval()
-    
-    # Wrap with normalization
-    mean = model_config['normalization']['mean']
-    std = model_config['normalization']['std']
-    model_wrapped = NormalizedModel(model, mean, std).to(device)
-    
-    return model_wrapped
-
-
-def load_dataset(dataset_config: Dict[str, Any], device: str) -> List[Tuple[torch.Tensor, int]]:
-    """
-    Load dataset based on configuration.
-    
-    Supports: cifar10, tiny_imagenet, imagenet (auto-fallback to tiny_imagenet), custom
-    """
-    dataset_name = dataset_config['name']
-    num_images = dataset_config['num_images']
-    seed = dataset_config['seed']
-    image_size = dataset_config.get('image_size', 224)
-    
-    print(f"Loading {dataset_name} dataset (num_images={num_images}, seed={seed})...")
-    
-    # Set seed
-    np.random.seed(seed)
-    
-    if dataset_name == 'cifar10':
-        # CIFAR-10: Auto-download, no normalization (handled by NormalizedModel)
-        transform = transforms.Compose([
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-        ])
-        dataset = CIFAR10(root='./data', train=False, download=True, transform=transform)
+    def __init__(
+        self,
+        victim_model: nn.Module,
+        surrogate_models: List[nn.Module],
+        epsilon: float = 2.0,
+        norm_bound: float = None,
+        max_queries: int = 10000,
+        targeted: bool = False,
+        device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ):
+        self.victim = victim_model.to(device).eval()
+        self.surrogates = [s.to(device).eval() for s in surrogate_models]
+        self.epsilon = epsilon
+        self.norm_bound = norm_bound
+        self.max_queries = max_queries
+        self.targeted = targeted
+        self.device = device
         
-    elif dataset_name == 'tiny_imagenet':
-        # Tiny ImageNet: Auto-download, pre-normalized
-        print(f"Using Tiny ImageNet...")
+        # Statistics tracking
+        self.query_count = 0
+        self.gradient_queries = 0
+        self.coimage_queries = 0
         
-        tiny_dataset, label_names = load_tiny_imagenet_dataset(
-            dataset_path="./data/tiny_imagenet",
-            download=True
-        )
-        
-        # Sample images (Tiny ImageNet is already normalized in the loader)
-        indices = np.random.choice(
-            len(tiny_dataset),
-            size=min(num_images, len(tiny_dataset)),
-            replace=False
-        )
-        
-        samples = []
-        for idx in indices:
-            img, label = tiny_dataset[int(idx)]
-            img = img.unsqueeze(0).to(device)
-            samples.append((img, label))
-        
-        print(f"✓ Loaded {len(samples)} samples from Tiny ImageNet")
-        return samples
-        
-    elif dataset_name in ['imagenet', 'imagenet_r']:
-        # ImageNet / ImageNet-R: Try full dataset, fallback to Tiny ImageNet
-        dataset_path = dataset_config['path']
-        
-        if not os.path.exists(dataset_path):
-            # AUTO-FALLBACK to Tiny ImageNet
-            print(f"⚠️  ImageNet path not found: {dataset_path}")
-            print(f"📥 Automatically using Tiny ImageNet instead...")
-            
-            tiny_dataset, label_names = load_tiny_imagenet_dataset(
-                dataset_path="./data/tiny_imagenet",
-                download=True
-            )
-            
-            # Sample images (already normalized)
-            indices = np.random.choice(
-                len(tiny_dataset),
-                size=min(num_images, len(tiny_dataset)),
-                replace=False
-            )
-            
-            samples = []
-            for idx in indices:
-                img, label = tiny_dataset[int(idx)]
-                img = img.unsqueeze(0).to(device)
-                samples.append((img, label))
-            
-            print(f"✓ Loaded {len(samples)} samples from Tiny ImageNet")
-            return samples
-        
-        # Full ImageNet exists - use it
-        transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-        ])
-        dataset = ImageFolder(root=dataset_path, transform=transform)
-        
-    elif dataset_name == 'custom':
-        # Custom dataset
-        transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(image_size),
-            transforms.ToTensor(),
-        ])
-        dataset_path = dataset_config['path']
-        dataset = ImageFolder(root=dataset_path, transform=transform)
+    def margin_loss(
+        self, 
+        logits: torch.Tensor, 
+        true_class: int, 
+        target_class: Optional[int] = None
+    ) -> torch.Tensor:
+        """Compute margin loss: L = f(c_t) - f(c_s)"""
+        if self.targeted and target_class is not None:
+            return logits[0, target_class] - logits[0, true_class]
+        else:
+            logits_copy = logits.clone()
+            logits_copy[0, true_class] = -float('inf')
+            second_highest_class = logits_copy.argmax(dim=1).item()
+            return logits[0, second_highest_class] - logits[0, true_class]
     
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-    
-    # Sample indices (for non-tiny_imagenet datasets)
-    indices = np.random.choice(len(dataset), size=min(num_images, len(dataset)), replace=False)
-    
-    # Load samples
-    samples = []
-    for idx in indices:
-        img, label = dataset[int(idx)]
-        img = img.unsqueeze(0).to(device)
-        samples.append((img, label))
-    
-    print(f"Loaded {len(samples)} samples")
-    return samples
-
-
-def filter_correctly_classified(
-    samples: List[Tuple[torch.Tensor, int]],
-    victim_model: nn.Module
-) -> List[Tuple[torch.Tensor, int]]:
-    """Filter samples to only keep correctly classified ones."""
-    print("Filtering correctly classified samples...")
-    
-    filtered = []
-    for img, true_label in samples:
+    def query_victim(self, x: torch.Tensor) -> torch.Tensor:
+        """Query victim model and increment counter."""
+        self.query_count += 1
         with torch.no_grad():
-            logits = victim_model(img)
-            pred_label = logits.argmax(dim=1).item()
-        if pred_label == true_label:
-            filtered.append((img, true_label))
-    
-    accuracy = (len(filtered) / len(samples)) * 100 if len(samples) > 0 else 0
-    print(f"Victim accuracy: {accuracy:.2f}% ({len(filtered)}/{len(samples)})")
-    
-    return filtered
-
-
-def run_minimal_victim_attack(
-    samples: List[Tuple[torch.Tensor, int]],
-    victim_model: nn.Module,
-    surrogate_models: List[nn.Module],
-    attack_config: Dict[str, Any],
-    device: str
-) -> Dict[str, Any]:
-    """
-    Run GFCS attack with minimal victim queries.
-    """
-    if not MINIMAL_VICTIM_AVAILABLE:
-        raise RuntimeError("gfcs_minimal_victim_queries module not available")
-    
-    # Extract attack parameters
-    epsilon = attack_config.get('epsilon', 2.0)
-    max_iterations = attack_config.get('max_iterations', 1000)
-    targeted = attack_config.get('targeted', False)
-    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto', 'value': None})
-    
-    # Determine norm bound
-    if norm_bound_config['type'] == 'auto':
-        norm_bound = None  # Will be auto-computed
-    else:
-        norm_bound = norm_bound_config.get('value')
-    
-    print(f"\nRunning gfcs_minimal_victim attack...")
-    print(f"Parameters: epsilon={epsilon}, max_iterations={max_iterations}, norm_bound={norm_bound}")
-    print(f"Number of samples: {len(samples)}")
-    print(f"Number of surrogates: {len(surrogate_models)}")
-    print()
-    
-    # Create attacker
-    attacker = GFCSMinimalVictimQueries(
-        victim_model=victim_model,
-        surrogate_models=surrogate_models,
-        epsilon=epsilon,
-        norm_bound=norm_bound,
-        max_iterations=max_iterations,
-        targeted=targeted,
-        device=device
-    )
-    
-    # Track results
-    results = {
-        'success_count': 0,
-        'total_samples': len(samples),
-        'victim_queries': [],
-        'surrogate_queries': [],
-        'iterations': [],
-        'perturbation_norms': [],
-        'times': [],
-        'failed_indices': []
-    }
-    
-    # Attack each sample
-    for idx, (img, true_class) in enumerate(samples):
-        start_time = time.time()
-        
-        try:
-            x_adv, stats = attacker.attack(img, true_class)
-            elapsed_time = time.time() - start_time
-            
-            # Record results
-            if stats['success']:
-                results['success_count'] += 1
-            
-            results['victim_queries'].append(stats['victim_queries'])
-            results['surrogate_queries'].append(stats['surrogate_queries'])
-            results['iterations'].append(stats['iterations'])
-            results['times'].append(elapsed_time)
-            
-            # Compute perturbation norm
-            delta = (x_adv - img).view(1, -1)
-            pert_norm = torch.norm(delta, p=2).item()
-            results['perturbation_norms'].append(pert_norm)
-            
-            # One-line output similar to GFCS
-            if stats['success']:
-                print(f"[{idx+1}/{len(samples)}] ✓ SUCCESS - VictimQ:{stats['victim_queries']}, "
-                      f"SurrQ:{stats['surrogate_queries']}, Iters:{stats['iterations']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            else:
-                results['failed_indices'].append(idx)
-                print(f"[{idx+1}/{len(samples)}] ✗ FAILED - VictimQ:{stats['victim_queries']}, "
-                      f"SurrQ:{stats['surrogate_queries']}, Iters:{stats['iterations']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            
-        except Exception as e:
-            elapsed_time = time.time() - start_time
-            print(f"[{idx+1}/{len(samples)}] ✗ ERROR: {str(e)}")
-            results['failed_indices'].append(idx)
-            results['victim_queries'].append(0)
-            results['surrogate_queries'].append(0)
-            results['iterations'].append(0)
-            results['perturbation_norms'].append(0)
-            results['times'].append(elapsed_time)
-    
-    # Compute summary statistics
-    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
-    results['median_victim_queries'] = float(np.median(results['victim_queries']))
-    results['mean_victim_queries'] = float(np.mean(results['victim_queries']))
-    results['median_surrogate_queries'] = float(np.median(results['surrogate_queries']))
-    results['mean_surrogate_queries'] = float(np.mean(results['surrogate_queries']))
-    results['median_iterations'] = float(np.median(results['iterations']))
-    results['mean_iterations'] = float(np.mean(results['iterations']))
-    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
-    results['mean_time'] = float(np.mean(results['times']))
-    
-    # For compatibility with existing code, add query_counts
-    results['query_counts'] = results['victim_queries']
-    results['median_queries'] = results['median_victim_queries']
-    results['mean_queries'] = results['mean_victim_queries']
-    
-    return results
-
-
-def run_weighted_alignment_attack(
-    samples: List[Tuple[torch.Tensor, int]],
-    victim_model: nn.Module,
-    surrogate_models: List[nn.Module],
-    attack_config: Dict[str, Any],
-    device: str
-) -> Dict[str, Any]:
-    """
-    Run GFCS-WeightedAlignment attack with trust-based weighting and smart ODS.
-    
-    Supports three variants:
-    - gfcs_weighted_alignment: Full (weighting + smart ODS)
-    - gfcs_weighted_alignment_only: Only adaptive surrogate weighting
-    - gfcs_smart_ods_only: Only smart ODS fallback
-    """
-    if not WEIGHTED_ALIGNMENT_AVAILABLE:
-        raise RuntimeError("gfcs_weighted_alignment module not available")
-    
-    method = attack_config.get('method', 'gfcs_weighted_alignment')
-    
-    # Extract attack parameters
-    epsilon = attack_config.get('epsilon', 2.0)
-    max_queries = attack_config.get('max_queries', 10000)
-    targeted = attack_config.get('targeted', False)
-    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto', 'value': None})
-    
-    # Determine norm bound
-    if norm_bound_config['type'] == 'auto':
-        norm_bound = None
-    else:
-        norm_bound = norm_bound_config.get('value')
-    
-    # Get adaptive-specific parameters
-    adaptive_params = attack_config.get('adaptive_params', {})
-    trust_learning_rate = adaptive_params.get('trust_learning_rate', 0.3)
-    trust_decay = adaptive_params.get('trust_decay', 0.8)
-    ods_momentum = adaptive_params.get('ods_momentum', 0.5)
-    
-    # Determine which improvements to use based on method
-    if method == 'gfcs_weighted_alignment':
-        use_adaptive_weighting = True
-        use_smart_ods = True
-    elif method == 'gfcs_weighted_alignment_only':
-        use_adaptive_weighting = True
-        use_smart_ods = False
-    elif method == 'gfcs_smart_ods_only':
-        use_adaptive_weighting = False
-        use_smart_ods = True
-    else:
-        use_adaptive_weighting = adaptive_params.get('use_adaptive_weighting', True)
-        use_smart_ods = adaptive_params.get('use_smart_ods', True)
-    
-    print(f"\nRunning {method} attack...")
-    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}, norm_bound={norm_bound}")
-    print(f"Adaptive params: trust_lr={trust_learning_rate}, trust_decay={trust_decay}, ods_momentum={ods_momentum}")
-    print(f"Use adaptive weighting: {use_adaptive_weighting}")
-    print(f"Use smart ODS: {use_smart_ods}")
-    print(f"Number of samples: {len(samples)}")
-    print(f"Number of surrogates: {len(surrogate_models)}")
-    print()
-    
-    # Create attacker
-    attacker = GFCSWeightedAlignment(
-        victim_model=victim_model,
-        surrogate_models=surrogate_models,
-        epsilon=epsilon,
-        norm_bound=norm_bound,
-        max_queries=max_queries,
-        targeted=targeted,
-        device=device,
-        trust_learning_rate=trust_learning_rate,
-        trust_decay=trust_decay,
-        ods_momentum=ods_momentum,
-        use_adaptive_weighting=use_adaptive_weighting,
-        use_smart_ods=use_smart_ods
-    )
-    
-    # Track results
-    results = {
-        'success_count': 0,
-        'total_samples': len(samples),
-        'query_counts': [],
-        'gradient_query_counts': [],
-        'coimage_query_counts': [],
-        'perturbation_norms': [],
-        'times': [],
-        'failed_indices': [],
-        'trust_scores_history': []  # Track how trust scores evolve
-    }
-    
-    # Attack each sample
-    for idx, (img, true_class) in enumerate(samples):
-        start_time = time.time()
-        
-        try:
-            x_adv, stats = attacker.attack(img, true_class)
-            elapsed_time = time.time() - start_time
-            
-            # Record results
-            if stats['success']:
-                results['success_count'] += 1
-            else:
-                results['failed_indices'].append(idx)
-            
-            results['query_counts'].append(stats['total_queries'])
-            results['gradient_query_counts'].append(stats['gradient_queries'])
-            results['coimage_query_counts'].append(stats['coimage_queries'])
-            results['times'].append(elapsed_time)
-            
-            # Save trust scores if available
-            if 'trust_scores' in stats:
-                results['trust_scores_history'].append(stats['trust_scores'])
-            
-            # Compute perturbation norm
-            delta = (x_adv - img).view(1, -1)
-            pert_norm = torch.norm(delta, p=2).item()
-            results['perturbation_norms'].append(pert_norm)
-            
-            # One-line output
-            if stats['success']:
-                print(f"[{idx+1}/{len(samples)}] ✓ SUCCESS - Q:{stats['total_queries']}, "
-                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            else:
-                print(f"[{idx+1}/{len(samples)}] ✗ FAILED - Q:{stats['total_queries']}, "
-                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            
-        except Exception as e:
-            elapsed_time = time.time() - start_time
-            print(f"[{idx+1}/{len(samples)}] ✗ ERROR: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            results['failed_indices'].append(idx)
-            results['query_counts'].append(max_queries)
-            results['gradient_query_counts'].append(0)
-            results['coimage_query_counts'].append(0)
-            results['perturbation_norms'].append(0)
-            results['times'].append(elapsed_time)
-    
-    # Compute summary statistics
-    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
-    results['median_queries'] = float(np.median(results['query_counts']))
-    results['mean_queries'] = float(np.mean(results['query_counts']))
-    results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
-    results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
-    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
-    results['mean_time'] = float(np.mean(results['times']))
-    
-    # Compute final trust scores statistics
-    if results['trust_scores_history']:
-        final_trust = results['trust_scores_history'][-1]
-        results['final_trust_scores'] = final_trust
-        results['trust_score_variance'] = float(np.var(final_trust))
-    
-    return results
-
-
-def run_smart_choice_attack(
-    samples: List[Tuple[torch.Tensor, int]],
-    victim_model: nn.Module,
-    surrogate_models: List[nn.Module],
-    attack_config: Dict[str, Any],
-    device: str
-) -> Dict[str, Any]:
-    """
-    Run GFCS-SmartChoice attack - picks surrogates by output similarity instead of randomly.
-    """
-    if not SMART_CHOICE_AVAILABLE:
-        raise RuntimeError("gfcs_smart_choice module not available")
-    
-    # Extract attack parameters
-    epsilon = attack_config.get('epsilon', 2.0)
-    max_queries = attack_config.get('max_queries', 10000)
-    targeted = attack_config.get('targeted', False)
-    norm_bound_config = attack_config.get('norm_bound', {'type': 'auto', 'value': None})
-    
-    if norm_bound_config['type'] == 'auto':
-        norm_bound = None
-    else:
-        norm_bound = norm_bound_config.get('value')
-    
-    print(f"\nRunning gfcs_smart_choice attack...")
-    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}, norm_bound={norm_bound}")
-    print(f"Number of samples: {len(samples)}")
-    print(f"Number of surrogates: {len(surrogate_models)}")
-    print()
-    
-    # Create attacker
-    attacker = GFCSSmartChoice(
-        victim_model=victim_model,
-        surrogate_models=surrogate_models,
-        epsilon=epsilon,
-        norm_bound=norm_bound,
-        max_queries=max_queries,
-        targeted=targeted,
-        device=device
-    )
-    
-    # Track results
-    results = {
-        'success_count': 0,
-        'total_samples': len(samples),
-        'query_counts': [],
-        'gradient_query_counts': [],
-        'coimage_query_counts': [],
-        'perturbation_norms': [],
-        'times': [],
-        'failed_indices': []
-    }
-    
-    # Attack each sample
-    for idx, (img, true_class) in enumerate(samples):
-        start_time = time.time()
-        
-        try:
-            x_adv, stats = attacker.attack(img, true_class)
-            elapsed_time = time.time() - start_time
-            
-            if stats['success']:
-                results['success_count'] += 1
-            else:
-                results['failed_indices'].append(idx)
-            
-            results['query_counts'].append(stats['total_queries'])
-            results['gradient_query_counts'].append(stats['gradient_queries'])
-            results['coimage_query_counts'].append(stats['coimage_queries'])
-            results['times'].append(elapsed_time)
-            
-            # Compute perturbation norm
-            delta = (x_adv - img).view(1, -1)
-            pert_norm = torch.norm(delta, p=2).item()
-            results['perturbation_norms'].append(pert_norm)
-            
-            if stats['success']:
-                print(f"[{idx+1}/{len(samples)}] ✓ SUCCESS - Q:{stats['total_queries']}, "
-                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            else:
-                print(f"[{idx+1}/{len(samples)}] ✗ FAILED - Q:{stats['total_queries']}, "
-                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                      f"L2:{pert_norm:.2f}, Time:{elapsed_time:.2f}s")
-            
-        except Exception as e:
-            elapsed_time = time.time() - start_time
-            print(f"[{idx+1}/{len(samples)}] ✗ ERROR: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            results['failed_indices'].append(idx)
-            results['query_counts'].append(max_queries)
-            results['gradient_query_counts'].append(0)
-            results['coimage_query_counts'].append(0)
-            results['perturbation_norms'].append(0)
-            results['times'].append(elapsed_time)
-    
-    # Compute summary statistics
-    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
-    results['median_queries'] = float(np.median(results['query_counts']))
-    results['mean_queries'] = float(np.mean(results['query_counts']))
-    results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
-    results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
-    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
-    results['mean_time'] = float(np.mean(results['times']))
-    
-    return results
-
-
-def run_attack(
-    samples: List[Tuple[torch.Tensor, int]],
-    victim_model: nn.Module,
-    surrogate_models: List[nn.Module],
-    attack_config: Dict[str, Any],
-    device: str
-) -> Dict[str, Any]:
-    """
-    Run attack based on configuration.
-    
-    Supports GFCS, GFCS Averaged Gradients, GFCS Adaptive, GFCS Minimal Victim, and SimBA attacks.
-    
-    Args:
-        samples: List of (image, label) tuples
-        victim_model: Victim model
-        surrogate_models: List of surrogate models (empty for SimBA)
-        attack_config: Attack configuration dict
-        device: Device
-        
-    Returns:
-        Results dictionary
-    """
-    method = attack_config.get('method', 'gfcs')
-    
-    # Route to minimal victim GFCS if requested
-    if method == 'gfcs_minimal_victim':
-        return run_minimal_victim_attack(samples, victim_model, surrogate_models, attack_config, device)
-    
-    # Route to weighted alignment GFCS if requested
-    if method in ['gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only']:
-        return run_weighted_alignment_attack(samples, victim_model, surrogate_models, attack_config, device)
-    
-    # Route to smart choice GFCS if requested
-    if method == 'gfcs_smart_choice':
-        return run_smart_choice_attack(samples, victim_model, surrogate_models, attack_config, device)
-    
-    # Original GFCS, GFCS Averaged Gradients, and SimBA code
-    epsilon = attack_config.get('epsilon', 2.0)
-    max_queries = attack_config.get('max_queries', 10000)
-    targeted = attack_config.get('targeted', False)
-    
-    print(f"\nRunning {method} attack...")
-    print(f"Parameters: epsilon={epsilon}, max_queries={max_queries}")
-    print(f"Number of samples: {len(samples)}")
-    
-    if method == 'gfcs':
-        # Get norm bound
-        norm_bound_config = attack_config.get('norm_bound', {'type': 'auto'})
-        if norm_bound_config['type'] == 'auto':
-            norm_bound = None  # Will be computed by GFCS
-        elif norm_bound_config['type'] == 'fixed':
-            norm_bound = norm_bound_config['value']
-        else:
-            norm_bound = None
-        
-        print(f"Number of surrogates: {len(surrogate_models)}")
-        print(f"Norm bound: {norm_bound}")
-        
-        attacker = GFCS(
-            victim_model=victim_model,
-            surrogate_models=surrogate_models,
-            epsilon=epsilon,
-            norm_bound=norm_bound,
-            max_queries=max_queries,
-            targeted=targeted,
-            device=device
-        )
-    
-    elif method == 'gfcs_averaged_gradients':
-        # GFCS with averaged gradients from all surrogates
-        if not AVERAGED_GRADIENTS_AVAILABLE:
-            raise RuntimeError("gfcs_averaged_gradients module not available")
-        
-        # Get norm bound
-        norm_bound_config = attack_config.get('norm_bound', {'type': 'auto'})
-        if norm_bound_config['type'] == 'auto':
-            norm_bound = None  # Will be computed by GFCS
-        elif norm_bound_config['type'] == 'fixed':
-            norm_bound = norm_bound_config['value']
-        else:
-            norm_bound = None
-        
-        print(f"Number of surrogates: {len(surrogate_models)}")
-        print(f"Norm bound: {norm_bound}")
-        print(f"Using AVERAGED gradients from all surrogates")
-        
-        attacker = GFCSAveragedGradients(
-            victim_model=victim_model,
-            surrogate_models=surrogate_models,
-            epsilon=epsilon,
-            norm_bound=norm_bound,
-            max_queries=max_queries,
-            targeted=targeted,
-            device=device
-        )
-        
-    elif method == 'simba':
-        # SimBA-specific parameters
-        pixel_attack = attack_config.get('pixel_attack', True)
-        freq_dims = attack_config.get('freq_dims', None)
-        order = attack_config.get('order', 'random')
-        
-        variant = "SimBA-pixel" if pixel_attack else "SimBA-DCT"
-        print(f"Variant: {variant}")
-        print(f"Order: {order}")
-        if not pixel_attack and freq_dims:
-            print(f"Frequency dimensions: {freq_dims}")
-        
-        attacker = SimBA(
-            model=victim_model,
-            epsilon=epsilon,
-            max_queries=max_queries,
-            freq_dims=freq_dims,
-            order=order,
-            targeted=targeted,
-            pixel_attack=pixel_attack,
-            device=device
-        )
-    else:
-        raise ValueError(f"Unknown attack method: {method}")
-    
-    results = {
-        'success_count': 0,
-        'total_samples': len(samples),
-        'query_counts': [],
-        'gradient_query_counts': [],
-        'coimage_query_counts': [],
-        'perturbation_norms': [],
-        'times': [],
-        'failed_indices': []
-    }
-    
-    for i, (img, true_label) in enumerate(samples):
-        print(f"[{i+1}/{len(samples)}] Attacking image...", end=' ')
-        
-        start_time = time.time()
-        x_adv, stats = attacker.attack(img, true_label)
-        elapsed_time = time.time() - start_time
-        
-        perturbation_norm = torch.norm(x_adv - img).item()
-        
-        results['query_counts'].append(stats['total_queries'])
-        results['perturbation_norms'].append(perturbation_norm)
-        results['times'].append(elapsed_time)
-        
-        # Handle different stat formats
-        if method in ['gfcs', 'gfcs_averaged_gradients']:
-            results['gradient_query_counts'].append(stats['gradient_queries'])
-            results['coimage_query_counts'].append(stats['coimage_queries'])
-        else:
-            # SimBA doesn't have these, use 0
-            results['gradient_query_counts'].append(0)
-            results['coimage_query_counts'].append(0)
-        
-        if stats['success']:
-            results['success_count'] += 1
-            if method in ['gfcs', 'gfcs_averaged_gradients']:
-                print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
-                      f"Grad:{stats['gradient_queries']}, ODS:{stats['coimage_queries']}, "
-                      f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
-            else:
-                print(f"✓ SUCCESS - Q:{stats['total_queries']}, "
-                      f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
-        else:
-            results['failed_indices'].append(i)
-            print(f"✗ FAILED - Q:{stats['total_queries']}, "
-                  f"L2:{perturbation_norm:.2f}, Time:{elapsed_time:.2f}s")
-    
-    # Compute aggregate statistics
-    results['success_rate'] = (results['success_count'] / results['total_samples']) * 100
-    results['median_queries'] = float(np.median(results['query_counts']))
-    results['mean_queries'] = float(np.mean(results['query_counts']))
-    
-    if method in ['gfcs', 'gfcs_averaged_gradients']:
-        results['median_gradient_queries'] = float(np.median(results['gradient_query_counts']))
-        results['median_coimage_queries'] = float(np.median(results['coimage_query_counts']))
-    
-    results['mean_perturbation_norm'] = float(np.mean(results['perturbation_norms']))
-    results['mean_time'] = float(np.mean(results['times']))
-    
-    return results
-
-
-def print_results(results: Dict[str, Any], experiment_id: str, description: str):
-    """Print experiment results."""
-    print(f"\n{'='*80}")
-    print(f"RESULTS: {experiment_id}")
-    print(f"Description: {description}")
-    print(f"{'='*80}")
-    print(f"Success Rate: {results['success_rate']:.2f}% ({results['success_count']}/{results['total_samples']})")
-    
-    # Check if this is minimal victim GFCS (has separate victim/surrogate queries)
-    if 'victim_queries' in results and 'surrogate_queries' in results:
-        print(f"\n--- Minimal Victim GFCS Statistics ---")
-        print(f"Median Victim Queries: {results['median_victim_queries']:.1f}")
-        print(f"Mean Victim Queries: {results['mean_victim_queries']:.2f}")
-        print(f"Median Surrogate Queries: {results['median_surrogate_queries']:.1f}")
-        print(f"Mean Surrogate Queries: {results['mean_surrogate_queries']:.2f}")
-        print(f"Median Iterations: {results['median_iterations']:.1f}")
-        print(f"Mean Iterations: {results['mean_iterations']:.2f}")
-    else:
-        # Standard GFCS, GFCS Averaged Gradients, GFCS Adaptive, or SimBA
-        print(f"Median Queries: {results['median_queries']:.0f}")
-        print(f"Mean Queries: {results['mean_queries']:.1f}")
-        
-        # Only print gradient/coimage stats if they exist
-        if 'median_gradient_queries' in results:
-            print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
-            print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
-    
-    # Print trust scores if available (GFCS Weighted Alignment)
-    if 'final_trust_scores' in results:
-        print(f"\n--- Weighted Alignment Statistics ---")
-        print(f"Final Trust Scores: {[f'{t:.2f}' for t in results['final_trust_scores']]}")
-        print(f"Trust Score Variance: {results['trust_score_variance']:.4f}")
-    
-    print(f"\nMean L2 Norm: {results['mean_perturbation_norm']:.2f}")
-    print(f"Mean Time per Image: {results['mean_time']:.2f}s")
-    print(f"Total Time: {sum(results['times']):.2f}s ({sum(results['times'])/60:.1f} minutes)")
-    if len(results['failed_indices']) > 0:
-        print(f"Failed Image Indices: {results['failed_indices'][:10]}{'...' if len(results['failed_indices']) > 10 else ''}")
-    print(f"{'='*80}\n")
-
-
-def save_results(results: Dict[str, Any], config: Dict[str, Any], output_dir: str):
-    """Save results to JSON file."""
-    os.makedirs(output_dir, exist_ok=True)
-    
-    experiment_id = config['experiment_id']
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    output_data = {
-        'config': config,
-        'results': results,
-        'timestamp': timestamp
-    }
-    
-    filename = f"{experiment_id}_results_{timestamp}.json"
-    filepath = os.path.join(output_dir, filename)
-    
-    with open(filepath, 'w') as f:
-        json.dump(output_data, f, indent=2)
-    
-    print(f"Results saved to: {filepath}")
-    return filepath
-
-
-def list_experiments(config_dir: str):
-    """List all available experiment configurations."""
-    config_files = sorted(Path(config_dir).glob("exp_*.json"))
-    
-    if not config_files:
-        print(f"No experiment configurations found in {config_dir}")
-        return
-    
-    print(f"\nAvailable Experiments in {config_dir}:")
-    print(f"{'='*80}")
-    
-    for config_file in config_files:
-        try:
-            config = load_config(str(config_file))
-            exp_id = config.get('experiment_id', 'unknown')
-            desc = config.get('description', 'No description')
-            victim = config.get('victim', {}).get('model_name', 'unknown')
-            dataset = config.get('dataset', {}).get('name', 'unknown')
-            method = config.get('attack', {}).get('method', 'unknown')
-            
-            print(f"\n{exp_id}: {config_file.name}")
-            print(f"  Description: {desc}")
-            print(f"  Method: {method}, Victim: {victim}, Dataset: {dataset}")
-        except Exception as e:
-            print(f"\n{config_file.name}: ERROR - {str(e)}")
-    
-    print(f"\n{'='*80}\n")
-
-
-def run_experiment_from_config(config_path: str, device: str, output_dir: str):
-    """
-    Run a single experiment from configuration file.
-    
-    Args:
-        config_path: Path to configuration JSON file
-        device: Device to use
-        output_dir: Directory to save results
-    """
-    print(f"\n{'='*80}")
-    print(f"Loading experiment configuration: {config_path}")
-    print(f"{'='*80}")
-    
-    # Load and validate config
-    config = load_config(config_path)
-    errors = validate_config(config)
-    
-    if errors:
-        print("Configuration validation failed:")
-        for error in errors:
-            print(f"  - {error}")
-        return None
-    
-    experiment_id = config['experiment_id']
-    description = config.get('description', 'No description')
-    method = config['attack']['method']
-    
-    print(f"Experiment ID: {experiment_id}")
-    print(f"Description: {description}")
-    print(f"Attack Method: {method}")
-    
-    # Set seed
-    seed = config['dataset']['seed']
-    set_seed(seed)
-    print(f"Random seed set to: {seed}")
-    
-    # Load victim model
-    print(f"\n{'-'*80}")
-    print("LOADING VICTIM MODEL")
-    print(f"{'-'*80}")
-    victim_model = load_model(config['victim'], device)
-    
-    # Load surrogate models (for GFCS variants)
-    surrogate_models = []
-    if method in ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 
-                  'gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only',
-                  'gfcs_smart_choice']:
-        print(f"\n{'-'*80}")
-        print("LOADING SURROGATE MODELS")
-        print(f"{'-'*80}")
-        for i, surrogate_config in enumerate(config['surrogates']):
-            print(f"Surrogate {i+1}/{len(config['surrogates'])}: ", end='')
-            surrogate_model = load_model(surrogate_config, device)
-            surrogate_models.append(surrogate_model)
-    else:
-        print(f"\n{'-'*80}")
-        print("SIMBA ATTACK (No surrogates needed)")
-        print(f"{'-'*80}")
-    
-    # Load dataset
-    print(f"\n{'-'*80}")
-    print("LOADING DATASET")
-    print(f"{'-'*80}")
-    samples = load_dataset(config['dataset'], device)
-    
-    # Filter correctly classified
-    print(f"\n{'-'*80}")
-    print("FILTERING CORRECTLY CLASSIFIED SAMPLES")
-    print(f"{'-'*80}")
-    samples_filtered = filter_correctly_classified(samples, victim_model)
-    
-    if len(samples_filtered) == 0:
-        print("ERROR: No correctly classified samples found!")
-        return None
-    
-    # Run attack
-    print(f"\n{'-'*80}")
-    print("RUNNING ATTACK")
-    print(f"{'-'*80}")
-    results = run_attack(
-        samples_filtered,
-        victim_model,
-        surrogate_models,
-        config['attack'],
-        device
-    )
-    
-    # Print results
-    print_results(results, experiment_id, description)
-    
-    # Save results
-    if config.get('output', {}).get('save_detailed_logs', True):
-        save_results(results, config, output_dir)
-    
-    return results
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='Run GFCS/GFCS-Averaged/GFCS-Adaptive/SimBA/GFCS-Minimal-Victim experiments from configuration files',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run single experiment
-  python run_experiment_from_config.py exp_001
-  
-  # Run multiple experiments
-  python run_experiment_from_config.py exp_001 exp_002 exp_003
-  
-  # Run GFCS-WeightedAlignment experiment
-  python run_experiment_from_config.py exp_gfcs_weighted_alignment
-  
-  # Run comparison (original GFCS vs weighted alignment GFCS)
-  python run_experiment_from_config.py exp_003 exp_gfcs_weighted_alignment
-  
-  # Use custom config directory
-  python run_experiment_from_config.py --config_dir ./my_configs exp_001
-  
-  # List all available experiments
-  python run_experiment_from_config.py --list
+            return self.victim(x)
+    
+    def compute_surrogate_similarities(
+        self,
+        victim_logits: torch.Tensor,
+        x: torch.Tensor
+    ) -> List[Tuple[int, float]]:
         """
-    )
-    
-    parser.add_argument('experiments', nargs='*', help='Experiment IDs to run (e.g., exp_001)')
-    parser.add_argument('--config_dir', type=str, default='./configs',
-                        help='Directory containing experiment config files')
-    parser.add_argument('--output_dir', type=str, default='./experiment_results',
-                        help='Directory to save results')
-    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='Device to use (cuda or cpu)')
-    parser.add_argument('--list', action='store_true',
-                        help='List all available experiments and exit')
-    
-    args = parser.parse_args()
-    
-    # List experiments if requested
-    if args.list:
-        list_experiments(args.config_dir)
-        return
-    
-    # Check if any experiments specified
-    if not args.experiments:
-        print("Error: No experiments specified. Use --list to see available experiments.")
-        parser.print_help()
-        return
-    
-    print("="*80)
-    print("GFCS EXPERIMENT RUNNER")
-    print("="*80)
-    print(f"Config directory: {args.config_dir}")
-    print(f"Output directory: {args.output_dir}")
-    print(f"Device: {args.device}")
-    print(f"Experiments to run: {', '.join(args.experiments)}")
-    
-    # Print availability of methods
-    print("\nAvailable Methods:")
-    print(f"  - GFCS (Original): ✓ Available")
-    print(f"  - GFCS Averaged Gradients: {'✓ Available' if AVERAGED_GRADIENTS_AVAILABLE else '✗ Not available'}")
-    print(f"  - GFCS Weighted Alignment: {'✓ Available' if WEIGHTED_ALIGNMENT_AVAILABLE else '✗ Not available'}")
-    print(f"  - GFCS Smart Choice: {'✓ Available' if SMART_CHOICE_AVAILABLE else '✗ Not available'}")
-    print(f"  - GFCS Minimal Victim: {'✓ Available' if MINIMAL_VICTIM_AVAILABLE else '✗ Not available'}")
-    print(f"  - SimBA: ✓ Available")
-    print("="*80)
-    
-    # Run each experiment
-    all_results = []
-    for exp_id in args.experiments:
-        # Find config file
-        config_file = None
-        for ext in ['json']:
-            potential_path = os.path.join(args.config_dir, f"{exp_id}.{ext}")
-            if os.path.exists(potential_path):
-                config_file = potential_path
-                break
+        Compute similarity between victim's output and each surrogate's output.
         
-        if not config_file:
-            # Try with full filename
-            potential_path = os.path.join(args.config_dir, exp_id)
-            if os.path.exists(potential_path):
-                config_file = potential_path
+        Returns:
+            List of (surrogate_index, similarity) tuples, sorted by similarity (descending)
+        """
+        victim_logits_flat = victim_logits.view(-1)
+        victim_norm = torch.norm(victim_logits_flat)
+        if victim_norm > 0:
+            victim_logits_flat = victim_logits_flat / victim_norm
         
-        if not config_file:
-            print(f"\nERROR: Configuration file not found for experiment: {exp_id}")
-            print(f"Looked in: {args.config_dir}")
-            continue
-        
-        # Run experiment
-        try:
-            result = run_experiment_from_config(config_file, args.device, args.output_dir)
-            if result:
-                all_results.append((exp_id, result))
-        except Exception as e:
-            print(f"\nERROR running experiment {exp_id}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-    
-    # Print summary of all experiments
-    if len(all_results) > 1:
-        print("\n" + "="*80)
-        print("SUMMARY OF ALL EXPERIMENTS")
-        print("="*80)
-        
-        # Check if we have minimal victim experiments
-        has_minimal = any('victim_queries' in result for _, result in all_results)
-        
-        if has_minimal:
-            print(f"{'Experiment':<20} {'Success Rate':<15} {'Victim Q':<12} {'Total Q':<12} {'Mean L2':<10}")
-            print("-"*80)
-            for exp_id, result in all_results:
-                if 'victim_queries' in result:
-                    # Minimal victim GFCS
-                    victim_q = f"{result['median_victim_queries']:.0f}"
-                    total_q = f"{result['median_surrogate_queries']:.0f}"
-                else:
-                    # Original GFCS or SimBA
-                    victim_q = f"{result['median_queries']:.0f}"
-                    total_q = "N/A"
+        similarities = []
+        with torch.no_grad():
+            for idx, surrogate in enumerate(self.surrogates):
+                surr_logits = surrogate(x).view(-1)
+                surr_norm = torch.norm(surr_logits)
+                if surr_norm > 0:
+                    surr_logits = surr_logits / surr_norm
                 
-                print(f"{exp_id:<20} {result['success_rate']:>6.2f}%        "
-                      f"{victim_q:>6}      {total_q:>6}      "
-                      f"{result['mean_perturbation_norm']:>6.2f}")
-        else:
-            # Standard table
-            print(f"{'Experiment':<25} {'Method':<25} {'Success':<12} {'Median Q':<12} {'Mean L2':<10}")
-            print("-"*95)
-            for exp_id, result in all_results:
-                # Infer method from results
-                if 'final_trust_scores' in result:
-                    method_name = "GFCS-WeightedAlign"
-                elif 'median_gradient_queries' in result:
-                    method_name = "GFCS"
-                else:
-                    method_name = "SimBA"
-                
-                print(f"{exp_id:<25} {method_name:<25} {result['success_rate']:>6.2f}%     "
-                      f"{result['median_queries']:>6.0f}       "
-                      f"{result['mean_perturbation_norm']:>6.2f}")
+                sim = torch.dot(victim_logits_flat, surr_logits).item()
+                similarities.append((idx, sim))
         
-        print("="*80)
+        # Sort by similarity (highest first)
+        similarities.sort(key=lambda x: x[1], reverse=True)
+        return similarities
     
-    print("\nAll experiments completed!")
-
-
-if __name__ == "__main__":
-    main()
+    def get_surrogate_gradient(
+        self, 
+        x: torch.Tensor, 
+        surrogate: nn.Module,
+        true_class: int,
+        target_class: Optional[int] = None
+    ) -> torch.Tensor:
+        """Compute normalized loss gradient from a surrogate model."""
+        x_input = x.clone().detach().requires_grad_(True)
+        
+        logits = surrogate(x_input)
+        loss = self.margin_loss(logits, true_class, target_class)
+        loss.backward()
+        
+        grad = x_input.grad.detach()
+        grad_norm = torch.norm(grad)
+        if grad_norm > 0:
+            grad = grad / grad_norm
+            
+        return grad
+    
+    def get_ods_direction(
+        self,
+        x: torch.Tensor,
+        surrogate: nn.Module,
+        num_classes: int = 1000
+    ) -> torch.Tensor:
+        """Compute ODS direction from surrogate's Jacobian row space."""
+        x_input = x.clone().detach().requires_grad_(True)
+        
+        w = torch.empty(num_classes, device=self.device).uniform_(-1, 1)
+        
+        logits = surrogate(x_input)
+        weighted_sum = (w * logits).sum()
+        weighted_sum.backward()
+        
+        grad = x_input.grad.detach()
+        grad_norm = torch.norm(grad)
+        if grad_norm > 0:
+            grad = grad / grad_norm
+            
+        return grad
+    
+    def project_onto_ball(
+        self,
+        x_adv: torch.Tensor,
+        x_orig: torch.Tensor,
+        norm_bound: float
+    ) -> torch.Tensor:
+        """Project onto L2 ball and clamp to valid range."""
+        delta = x_adv - x_orig
+        delta_norm = torch.norm(delta)
+        
+        if delta_norm > norm_bound:
+            delta = delta * (norm_bound / delta_norm)
+            
+        return torch.clamp(x_orig + delta, 0, 1)
+    
+    def is_adversarial(
+        self,
+        logits: torch.Tensor,
+        true_class: int,
+        target_class: Optional[int] = None
+    ) -> bool:
+        """Check if prediction is adversarial."""
+        pred_class = logits.argmax(dim=1).item()
+        if self.targeted:
+            return pred_class == target_class
+        return pred_class != true_class
+    
+    def attack(
+        self,
+        x: torch.Tensor,
+        true_class: int,
+        target_class: Optional[int] = None
+    ) -> Tuple[torch.Tensor, dict]:
+        """
+        Run GFCS-SmartChoice attack.
+        
+        Same as original GFCS Algorithm 1, but:
+        - Line 7: Instead of randomly sampling, pick surrogate with highest similarity
+        - Line 11: For ODS, also prefer higher-similarity surrogates
+        
+        Args:
+            x: Input image tensor
+            true_class: True class label
+            target_class: Target class for targeted attacks
+            
+        Returns:
+            x_adv: Adversarial example
+            stats: Dictionary with attack statistics
+        """
+        # Reset statistics
+        self.query_count = 0
+        self.gradient_queries = 0
+        self.coimage_queries = 0
+        
+        # Set norm bound if not specified
+        if self.norm_bound is None:
+            D = x.numel()
+            self.norm_bound = np.sqrt(0.001 * D)
+        
+        # Initialize
+        x_orig = x.clone().to(self.device)
+        x_adv = x_orig.clone()
+        
+        # Get number of classes
+        with torch.no_grad():
+            num_classes = self.surrogates[0](x_adv).shape[1]
+        
+        # Initial victim query to compute similarities
+        victim_logits = self.query_victim(x_adv)
+        
+        # Check if already adversarial
+        if self.is_adversarial(victim_logits, true_class, target_class):
+            return x_adv, self._get_stats(success=True)
+        
+        # Compute surrogate similarities (sorted by similarity, highest first)
+        surrogate_ranking = self.compute_surrogate_similarities(victim_logits, x_adv)
+        
+        # S_rem: indices of remaining surrogates to try, in similarity order
+        S_rem = [idx for idx, _ in surrogate_ranking]
+        
+        # Main loop
+        while self.query_count < self.max_queries:
+            # Query victim and check adversarial
+            victim_logits = self.query_victim(x_adv)
+            
+            if self.is_adversarial(victim_logits, true_class, target_class):
+                return x_adv, self._get_stats(success=True)
+            
+            current_loss = self.margin_loss(victim_logits, true_class, target_class).item()
+            
+            # Get candidate direction
+            if len(S_rem) > 0:
+                # GRADIENT FIRST: Pick most similar remaining surrogate
+                surrogate_idx = S_rem.pop(0)  # Take first (most similar)
+                surrogate = self.surrogates[surrogate_idx]
+                
+                q = self.get_surrogate_gradient(x_adv, surrogate, true_class, target_class)
+                is_gradient_step = True
+            else:
+                # COIMAGE SECOND: Use most similar surrogate for ODS
+                surrogate_idx = surrogate_ranking[0][0]  # Most similar overall
+                surrogate = self.surrogates[surrogate_idx]
+                
+                q = self.get_ods_direction(x_adv, surrogate, num_classes)
+                is_gradient_step = False
+            
+            # Try both step directions
+            for alpha in [self.epsilon, -self.epsilon]:
+                x_candidate = self.project_onto_ball(
+                    x_adv + alpha * q,
+                    x_orig,
+                    self.norm_bound
+                )
+                
+                candidate_logits = self.query_victim(x_candidate)
+                candidate_loss = self.margin_loss(candidate_logits, true_class, target_class).item()
+                
+                if is_gradient_step:
+                    self.gradient_queries += 1
+                else:
+                    self.coimage_queries += 1
+                
+                if candidate_loss > current_loss:
+                    x_adv = x_candidate
+                    
+                    # Reset S_rem to full ranking order
+                    S_rem = [idx for idx, _ in surrogate_ranking]
+                    break
+        
+        # Final check
+        final_logits = self.query_victim(x_adv)
+        success = self.is_adversarial(final_logits, true_class, target_class)
+        
+        return x_adv, self._get_stats(success=success)
+    
+    def _get_stats(self, success: bool) -> dict:
+        """Return attack statistics."""
+        return {
+            'success': success,
+            'total_queries': self.query_count,
+            'gradient_queries': self.gradient_queries,
+            'coimage_queries': self.coimage_queries,
+            'gradient_queries_ratio': self.gradient_queries / max(1, self.query_count)
+        }
