@@ -1,8 +1,8 @@
 """
-GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, Averaged Gradients GFCS, and Adaptive GFCS support)
+GFCS Experiment Runner (with SimBA, Minimal Victim GFCS, Averaged Gradients GFCS, and Weighted Alignment GFCS support)
 ======================
 Runs experiments based on JSON configuration files.
-Supports GFCS, GFCS Averaged Gradients, GFCS Adaptive, SimBA, and GFCS Minimal Victim attacks.
+Supports GFCS, GFCS Averaged Gradients, GFCS Weighted Alignment, SimBA, and GFCS Minimal Victim attacks.
 
 Usage:
     python run_experiment_from_config.py exp_001
@@ -46,13 +46,13 @@ except ImportError:
     MINIMAL_VICTIM_AVAILABLE = False
     print("WARNING: gfcs_minimal_victim_queries.py not found. Minimal victim method will not be available.")
 
-# Import adaptive GFCS
+# Import weighted alignment GFCS
 try:
-    from gfcs_adaptive import GFCSAdaptive, GFCSAdaptiveAblation
-    ADAPTIVE_AVAILABLE = True
+    from gfcs_weighted_alignment import GFCSWeightedAlignment, GFCSWeightedAlignmentAblation
+    WEIGHTED_ALIGNMENT_AVAILABLE = True
 except ImportError:
-    ADAPTIVE_AVAILABLE = False
-    print("WARNING: gfcs_adaptive.py not found. Adaptive GFCS method will not be available.")
+    WEIGHTED_ALIGNMENT_AVAILABLE = False
+    print("WARNING: gfcs_weighted_alignment.py not found. Weighted alignment method will not be available.")
 
 
 class NormalizedModel(nn.Module):
@@ -119,8 +119,8 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     
     # Validate attack method
     attack_method = config['attack'].get('method')
-    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'gfcs_adaptive', 
-                     'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only', 'simba']
+    valid_methods = ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 'gfcs_weighted_alignment', 
+                     'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only', 'simba']
     if attack_method not in valid_methods:
         errors.append(f"Invalid attack method: {attack_method}. Must be one of {valid_methods}")
     
@@ -132,9 +132,9 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
     if attack_method == 'gfcs_minimal_victim' and not MINIMAL_VICTIM_AVAILABLE:
         errors.append("gfcs_minimal_victim method requested but gfcs_minimal_victim_queries.py not found")
     
-    # Check that adaptive GFCS is available if requested
-    if attack_method in ['gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only'] and not ADAPTIVE_AVAILABLE:
-        errors.append(f"{attack_method} method requested but gfcs_adaptive.py not found")
+    # Check that weighted alignment GFCS is available if requested
+    if attack_method in ['gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only'] and not WEIGHTED_ALIGNMENT_AVAILABLE:
+        errors.append(f"{attack_method} method requested but gfcs_weighted_alignment.py not found")
     
     # Validate max_iterations for minimal victim GFCS
     if attack_method == 'gfcs_minimal_victim':
@@ -479,7 +479,7 @@ def run_minimal_victim_attack(
     return results
 
 
-def run_adaptive_attack(
+def run_weighted_alignment_attack(
     samples: List[Tuple[torch.Tensor, int]],
     victim_model: nn.Module,
     surrogate_models: List[nn.Module],
@@ -487,17 +487,17 @@ def run_adaptive_attack(
     device: str
 ) -> Dict[str, Any]:
     """
-    Run GFCS-Adaptive attack with adaptive surrogate weighting and smart ODS.
+    Run GFCS-WeightedAlignment attack with trust-based weighting and smart ODS.
     
     Supports three variants:
-    - gfcs_adaptive: Full adaptive (weighting + smart ODS)
-    - gfcs_adaptive_weighting_only: Only adaptive surrogate weighting
-    - gfcs_adaptive_smart_ods_only: Only smart ODS fallback
+    - gfcs_weighted_alignment: Full (weighting + smart ODS)
+    - gfcs_weighted_alignment_only: Only adaptive surrogate weighting
+    - gfcs_smart_ods_only: Only smart ODS fallback
     """
-    if not ADAPTIVE_AVAILABLE:
-        raise RuntimeError("gfcs_adaptive module not available")
+    if not WEIGHTED_ALIGNMENT_AVAILABLE:
+        raise RuntimeError("gfcs_weighted_alignment module not available")
     
-    method = attack_config.get('method', 'gfcs_adaptive')
+    method = attack_config.get('method', 'gfcs_weighted_alignment')
     
     # Extract attack parameters
     epsilon = attack_config.get('epsilon', 2.0)
@@ -518,13 +518,13 @@ def run_adaptive_attack(
     ods_momentum = adaptive_params.get('ods_momentum', 0.5)
     
     # Determine which improvements to use based on method
-    if method == 'gfcs_adaptive':
+    if method == 'gfcs_weighted_alignment':
         use_adaptive_weighting = True
         use_smart_ods = True
-    elif method == 'gfcs_adaptive_weighting_only':
+    elif method == 'gfcs_weighted_alignment_only':
         use_adaptive_weighting = True
         use_smart_ods = False
-    elif method == 'gfcs_adaptive_smart_ods_only':
+    elif method == 'gfcs_smart_ods_only':
         use_adaptive_weighting = False
         use_smart_ods = True
     else:
@@ -541,7 +541,7 @@ def run_adaptive_attack(
     print()
     
     # Create attacker
-    attacker = GFCSAdaptive(
+    attacker = GFCSWeightedAlignment(
         victim_model=victim_model,
         surrogate_models=surrogate_models,
         epsilon=epsilon,
@@ -665,9 +665,9 @@ def run_attack(
     if method == 'gfcs_minimal_victim':
         return run_minimal_victim_attack(samples, victim_model, surrogate_models, attack_config, device)
     
-    # Route to adaptive GFCS if requested
-    if method in ['gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only']:
-        return run_adaptive_attack(samples, victim_model, surrogate_models, attack_config, device)
+    # Route to weighted alignment GFCS if requested
+    if method in ['gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only']:
+        return run_weighted_alignment_attack(samples, victim_model, surrogate_models, attack_config, device)
     
     # Original GFCS, GFCS Averaged Gradients, and SimBA code
     epsilon = attack_config.get('epsilon', 2.0)
@@ -843,9 +843,9 @@ def print_results(results: Dict[str, Any], experiment_id: str, description: str)
             print(f"Median Gradient Queries: {results['median_gradient_queries']:.0f}")
             print(f"Median Coimage Queries: {results['median_coimage_queries']:.0f}")
     
-    # Print trust scores if available (GFCS Adaptive)
+    # Print trust scores if available (GFCS Weighted Alignment)
     if 'final_trust_scores' in results:
-        print(f"\n--- Adaptive GFCS Statistics ---")
+        print(f"\n--- Weighted Alignment Statistics ---")
         print(f"Final Trust Scores: {[f'{t:.2f}' for t in results['final_trust_scores']]}")
         print(f"Trust Score Variance: {results['trust_score_variance']:.4f}")
     
@@ -954,7 +954,7 @@ def run_experiment_from_config(config_path: str, device: str, output_dir: str):
     # Load surrogate models (for GFCS variants)
     surrogate_models = []
     if method in ['gfcs', 'gfcs_averaged_gradients', 'gfcs_minimal_victim', 
-                  'gfcs_adaptive', 'gfcs_adaptive_weighting_only', 'gfcs_adaptive_smart_ods_only']:
+                  'gfcs_weighted_alignment', 'gfcs_weighted_alignment_only', 'gfcs_smart_ods_only']:
         print(f"\n{'-'*80}")
         print("LOADING SURROGATE MODELS")
         print(f"{'-'*80}")
@@ -1017,11 +1017,11 @@ Examples:
   # Run multiple experiments
   python run_experiment_from_config.py exp_001 exp_002 exp_003
   
-  # Run GFCS-Adaptive experiment
-  python run_experiment_from_config.py exp_gfcs_adaptive
+  # Run GFCS-WeightedAlignment experiment
+  python run_experiment_from_config.py exp_gfcs_weighted_alignment
   
-  # Run comparison (original GFCS vs adaptive GFCS)
-  python run_experiment_from_config.py exp_003 exp_gfcs_adaptive
+  # Run comparison (original GFCS vs weighted alignment GFCS)
+  python run_experiment_from_config.py exp_003 exp_gfcs_weighted_alignment
   
   # Use custom config directory
   python run_experiment_from_config.py --config_dir ./my_configs exp_001
@@ -1066,7 +1066,7 @@ Examples:
     print("\nAvailable Methods:")
     print(f"  - GFCS (Original): ✓ Available")
     print(f"  - GFCS Averaged Gradients: {'✓ Available' if AVERAGED_GRADIENTS_AVAILABLE else '✗ Not available'}")
-    print(f"  - GFCS Adaptive: {'✓ Available' if ADAPTIVE_AVAILABLE else '✗ Not available'}")
+    print(f"  - GFCS Weighted Alignment: {'✓ Available' if WEIGHTED_ALIGNMENT_AVAILABLE else '✗ Not available'}")
     print(f"  - GFCS Minimal Victim: {'✓ Available' if MINIMAL_VICTIM_AVAILABLE else '✗ Not available'}")
     print(f"  - SimBA: ✓ Available")
     print("="*80)
@@ -1135,7 +1135,7 @@ Examples:
             for exp_id, result in all_results:
                 # Infer method from results
                 if 'final_trust_scores' in result:
-                    method_name = "GFCS-Adaptive"
+                    method_name = "GFCS-WeightedAlign"
                 elif 'median_gradient_queries' in result:
                     method_name = "GFCS"
                 else:
