@@ -21,13 +21,6 @@ import numpy as np
 import sys
 import os
 
-# Configure matplotlib for inline display in Colab
-try:
-    from IPython import get_ipython
-    get_ipython().run_line_magic('matplotlib', 'inline')
-except:
-    pass
-
 # Add the GFCS directory to path (adjust as needed)
 # Assuming this script is in the GFCS directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -324,7 +317,14 @@ def main():
     output_path = 'gfcs_comparison.png'
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
     print(f"✓ Saved: {output_path}")
-    plt.show()  # Display in Colab
+    
+    # Display in Colab/Jupyter
+    try:
+        from IPython.display import Image as IPImage, display
+        display(IPImage(filename=output_path))
+    except:
+        print("  (Image saved but couldn't display inline - check file browser)")
+    
     plt.close()
     
     # Perturbation visualization
@@ -362,7 +362,14 @@ def main():
         output_path = 'perturbations_comparison.png'
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         print(f"✓ Saved: {output_path}")
-        plt.show()  # Display in Colab
+        
+        # Display in Colab/Jupyter
+        try:
+            from IPython.display import Image as IPImage, display
+            display(IPImage(filename=output_path))
+        except:
+            print("  (Image saved but couldn't display inline - check file browser)")
+        
         plt.close()
     
     print("\n" + "="*70)
