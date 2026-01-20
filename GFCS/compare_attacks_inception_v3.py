@@ -21,6 +21,13 @@ import numpy as np
 import sys
 import os
 
+# Configure matplotlib for inline display in Colab
+try:
+    from IPython import get_ipython
+    get_ipython().run_line_magic('matplotlib', 'inline')
+except:
+    pass
+
 # Add the GFCS directory to path (adjust as needed)
 # Assuming this script is in the GFCS directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -314,8 +321,11 @@ def main():
     axes[2].axis('off')
     
     plt.tight_layout()
-    plt.savefig('/mnt/user-data/outputs/gfcs_comparison.png', dpi=150, bbox_inches='tight')
-    print("✓ Saved: gfcs_comparison.png")
+    output_path = 'gfcs_comparison.png'
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved: {output_path}")
+    plt.show()  # Display in Colab
+    plt.close()
     
     # Perturbation visualization
     if stats_gfcs['success'] and stats_weighted['success']:
@@ -349,12 +359,20 @@ def main():
         axes[2].axis('off')
         
         plt.tight_layout()
-        plt.savefig('/mnt/user-data/outputs/perturbations_comparison.png', dpi=150, bbox_inches='tight')
-        print("✓ Saved: perturbations_comparison.png")
+        output_path = 'perturbations_comparison.png'
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"✓ Saved: {output_path}")
+        plt.show()  # Display in Colab
+        plt.close()
     
     print("\n" + "="*70)
-    print("✓ All visualizations saved to /mnt/user-data/outputs/")
+    print("✓ All visualizations saved to current directory")
+    print("  - gfcs_comparison.png")
+    print("  - perturbations_comparison.png")
     print("="*70)
+    
+    # If running in Colab, files are saved in /content/
+    # You can find them in the file browser on the left
 
 
 if __name__ == "__main__":
