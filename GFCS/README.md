@@ -170,6 +170,6 @@ def rank_surrogates(self, x, true_class):
 
 ## References
 
-- [GFCS Paper](https://openreview.net/forum?id=xx) - ICLR 2022
+- [GFCS Paper](https://openreview.net/forum?id=Zf4ZdI4OQPV) - ICLR 2022
 - [SimBA Paper](https://arxiv.org/abs/1905.07121) - ICML 2019
 - [ODS Paper](https://arxiv.org/abs/2010.06838) - NeurIPS 2020
