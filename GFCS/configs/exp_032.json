@@ -1,8 +1,8 @@
 {
   "experiment_id": "exp_032",
-  "description": "gfcs_weighted_alignment - Inception-v3 victim on ImageNet",
+  "description": "gfcs_weighted_alignment - Inception-v3 victim on Tiny ImageNet",
   "surr_desc": "7 surrogates: VGG-19, VGG-16, ResNet-152, ResNet-50, ResNet-34, DenseNet-121, MobileNet-v2",
-  "data_desc": "ImageNet validation set, 2000 images, seed 42",
+  "data_desc": "Tiny ImageNet, 2000 images, seed 42",
   "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto (sqrt(0.001*D)), gradient_normalization=l2, ods_sampling=uniform",
   "victim": {
     "model_name": "inception_v3",

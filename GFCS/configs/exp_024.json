@@ -1,8 +1,8 @@
 {
     "experiment_id": "exp_024",
-    "description": "GFCS Minimal Victim Queries - Inception-v3 victim on ImageNet",
+    "description": "GFCS Minimal Victim Queries - Inception-v3 victim on Tiny ImageNet",
     "surr_desc": "10 surrogates: All available pretrained ImageNet models except Inception-v3",
-    "data_desc": "ImageNet validation set, 50 images, seed 42",
+    "data_desc": "Tiny ImageNet, 50 images, seed 42",
     "addition_desc": "Minimal victim queries (only 2), averaged gradients, epsilon=2.0, max_iterations=1000",
     "victim": {
         "model_name": "inception_v3",

@@ -1,8 +1,8 @@
 {
   "experiment_id": "exp_001",
-  "description": "Baseline GFCS attack - ResNet-50 victim on ImageNet",
+  "description": "Baseline GFCS attack - ResNet-50 victim on Tiny ImageNet",
   "surr_desc": "4 surrogates: VGG-19, ResNet-34, DenseNet-121, MobileNet-v2",
-  "data_desc": "ImageNet validation set, 2000 images, seed 42",
+  "data_desc": "Tiny ImageNet, 2000 images, seed 42",
   "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto (sqrt(0.001*D)), gradient_normalization=l2, ods_sampling=uniform",
   "victim": {
     "model_name": "resnet50",

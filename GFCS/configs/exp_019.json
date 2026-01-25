@@ -1,7 +1,7 @@
 {
   "experiment_id": "exp_019",
-  "description": "GFCS attack - Inception-v3 victim with 1 surrogate (ResNet-152)",
-  "surr_desc": "1 surrogate: ResNet-152",
+  "description": "GFCS attack - Inception-v3 victim with 1 surrogate (ResNet-34)",
+  "surr_desc": "1 surrogate: ResNet-34",
   "data_desc": "Tiny ImageNet, 2000 images, seed 42",
   "addition_desc": "epsilon=2.0, max_queries=10000, untargeted, norm_bound=auto",
   "victim": {

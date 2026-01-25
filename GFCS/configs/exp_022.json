@@ -1,5 +1,5 @@
 {
-  "experiment_id": "exp_023",
+  "experiment_id": "exp_022",
   "description": "GFCS attack - Inception-v3 victim with 10 surrogates",
   "surr_desc": "10 surrogates: All available pretrained ImageNet models except Inception-v3",
   "data_desc": "Tiny ImageNet, 2000 images, seed 42",

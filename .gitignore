@@ -60,3 +60,9 @@ Thumbs.db
 env/
 venv/
 ENV/
+
+# GFCS - Files not needed for run_experiment_from_config
+GFCS/test_gfcs.py
+GFCS/compare_attacks_inception_v3.py
+GFCS/generate_configs.py
+GFCS/utils.py
