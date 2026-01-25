@@ -403,17 +403,6 @@ attacker = SimBA(
 x_adv, stats = attacker.attack(x, true_class)
 ```
 
-## Comparison: SimBA vs GFCS Variants
-
-| Aspect | SimBA | GFCS (Standard) | GFCS Variants |
-|--------|-------|-----------------|---------------|
-| Uses surrogates | No | Yes | Yes |
-| Search directions | Orthonormal basis (pixel/DCT) | Surrogate gradients + ODS | Weighted/averaged gradients + smart ODS |
-| Median queries | ~500-1000 | ~4-18 | ~3-15 (varies by variant) |
-| Complexity | Very simple | Simple | Moderate |
-| Query efficiency | Low | High | Very high (some variants) |
-| Victim query budget | Full budget | Full budget | Minimal (2 queries) to full |
-
 ## Implemented Extensions
 
 This repository implements several extensions to the original GFCS algorithm:
