@@ -522,13 +522,6 @@ Helper functions for:
 
 ## References
 
-- **GFCS Paper**: Lord, N., Mueller, R., & Bertinetto, L. (2022). "Attacking Deep Networks with Surrogate-Based Adversarial Black-Box Methods is Easy". *ICLR 2022*.
-  - Paper: [OpenReview](https://openreview.net/forum?id=IbmWKJHfFrb)
-  - Code: [GitHub](https://github.com/fiveai/GFCS)
-
-- **SimBA Paper**: Guo, C., Gardner, J. R., You, Y., Wilson, A. G., & Weinberger, K. Q. (2019). "Simple Black-box Adversarial Attacks". *ICML 2019*.
-  - Paper: [arXiv:1905.07121](https://arxiv.org/abs/1905.07121)
-  - Code: [GitHub](https://github.com/cg563/simple-blackbox-attack)
-
-- **ODS Technique**: Output Diversified Sampling is from Suya et al.'s "Hybrid Batch Attacks" paper (USENIX Security 2020).
-  - Paper: [arXiv:1908.07000](https://arxiv.org/abs/1908.07000)
+- [GFCS Paper](https://openreview.net/forum?id=Zf4ZdI4OQPV) - ICLR 2022
+- [SimBA Paper](https://arxiv.org/abs/1905.07121) - ICML 2019
+- [ODS Paper](https://arxiv.org/abs/2010.06838) - NeurIPS 2020
